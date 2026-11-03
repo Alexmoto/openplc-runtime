@@ -56,7 +56,7 @@ def draw(ctx, model, screen, values, online, width, height, pressed=None):
         if not model.visible(e, values):
             continue
         if e['kind'] == 'graphic':
-            draw_graphic(ctx, e)
+            draw_graphic(ctx, e, model.bound(e, 'value', values), bool(e['bindings'].get('value')))
             continue
         ctx.save()
         ctx.new_path()
