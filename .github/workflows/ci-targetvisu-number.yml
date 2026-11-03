@@ -7,6 +7,7 @@ on:
       - 'updates/targetvisu-graphic-v0.7.0/**'
       - 'updates/targetvisu-screen-bg-v0.8.0/**'
       - 'updates/targetvisu-transparent-v0.9.0/**'
+      - 'updates/targetvisu-number-input-v1.0.0/**'
       - '.github/workflows/ci-targetvisu-number.yml'
   push:
     paths:
@@ -23,7 +24,7 @@ jobs:
           python-version: '3.11'
       - name: Verify Runtime and installer Python syntax
         run: |
-          python -m py_compile tools/targetvisu/model.py tools/targetvisu/render.py tools/targetvisu/graphics.py updates/targetvisu-screen-bg-v0.8.0/install_update.py updates/targetvisu-transparent-v0.9.0/install_update.py updates/targetvisu-number-v0.6.0/install_update.py updates/targetvisu-graphic-v0.7.0/install_update.py
+          python -m py_compile tools/targetvisu/model.py tools/targetvisu/render.py tools/targetvisu/graphics.py tools/targetvisu/keypad.py tools/targetvisu/viewer.py updates/targetvisu-screen-bg-v0.8.0/install_update.py updates/targetvisu-transparent-v0.9.0/install_update.py updates/targetvisu-number-input-v1.0.0/install_update.py updates/targetvisu-number-v0.6.0/install_update.py updates/targetvisu-graphic-v0.7.0/install_update.py
       - name: Test Number bindings, Graphic View states, and backward compatibility
         env:
           PYTHONPATH: tools
@@ -35,4 +36,6 @@ jobs:
           targetvisu.tests.test_graphics.GraphicTests.test_screen_background_image_validation_and_rendering
           targetvisu.tests.test_targetvisu.ModelTests.test_transparent_button_and_number_keep_full_hit_area
           targetvisu.tests.test_graphics.GraphicTests.test_transparent_button_keeps_background_visible_and_border_optional
+          targetvisu.tests.test_targetvisu.ModelTests.test_number_mode_write_target_must_match_displayed_variable
+          targetvisu.tests.test_keypad.KeypadTests
           -v
