@@ -104,6 +104,35 @@ class ModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'fillTransparent'):
             Model(doc, debug_map)
 
+    def test_number_mode_write_target_must_match_displayed_variable(self):
+        doc = copy.deepcopy(fixture().doc)
+        debug_map = load_json(ROOT / 'example.debug-map.json')
+        number = next(e for e in doc['screens'][0]['elements'] if e['id'] == 'Setpoint')
+        number['numberMode'] = 'input-output'
+        model = Model(doc, debug_map)
+        self.assertEqual(model.elements['Setpoint']['action']['target'], 'Pump1.Setpoint')
+        number['action']['target'] = 'Pump1.Pressure'
+        with self.assertRaisesRegex(ValueError, 'displayed value variable'):
+            Model(doc, debug_map)
+        number['action']['target'] = 'Pump1.Setpoint'
+        number['numberMode'] = 'output'
+        with self.assertRaisesRegex(ValueError, 'Output mode'):
+            Model(doc, debug_map)
+        number.pop('numberMode')
+        Model(doc, debug_map)  # Older projects with a write action stay usable.
+        number['numberMode'] = 'input-output'
+        number['bindings']['value'] = ''
+        with self.assertRaisesRegex(ValueError, 'displayed value variable'):
+            Model(doc, debug_map)
+        number['bindings']['value'] = 'Pump1.Setpoint'
+        data = copy.deepcopy(debug_map)
+        next(leaf for leaf in data['leaves'] if leaf['path'] == 'Pump1.Setpoint')['readOnly'] = True
+        with self.assertRaisesRegex(ValueError, 'read-only'):
+            Model(doc, data)
+        number['numberMode'] = 'something'
+        with self.assertRaisesRegex(ValueError, 'Number mode'):
+            Model(doc, debug_map)
+
     def test_unknown_symbol_no_address_guess(self):
         m = fixture()
         doc = copy.deepcopy(m.doc)
