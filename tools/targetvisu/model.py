@@ -83,6 +83,9 @@ def document(raw):
             number(e.get('borderRadius', 0), 0, 100, 'borderRadius')
             number(e.get('fontSize'), 6, 200, 'fontSize', True)
             number(e.get('decimals'), 0, 6, 'decimals', True)
+            mode = e.get('numberMode')
+            require(mode is None or (e['kind'] == 'number' and mode in ('output', 'input-output')),
+                    'Invalid Number mode')
             number(e.get('minimum'), -float('inf'), float('inf'), 'minimum')
             number(e.get('maximum'), e['minimum'], float('inf'), 'maximum')
             require(isinstance(e.get('text'), str) and len(e['text']) <= 1024, 'Invalid text')
@@ -99,6 +102,12 @@ def document(raw):
             if e['kind'] == 'graphic':
                 require(a.get('kind') == 'none', 'Graphic view is display-only')
             require(a.get('kind') in ACTIONS and isinstance(a.get('target'), str) and len(a['target']) <= 256, 'Invalid action')
+            if mode == 'input-output':
+                require(a['kind'] == 'write' and e['bindings']['value'] and
+                        a['target'].lower() == e['bindings']['value'].lower(),
+                        'Input + Output requires a writable displayed value variable')
+            elif mode == 'output':
+                require(a['kind'] != 'write', 'Output mode cannot write to PLC')
             require(type(a.get('value')) in (bool, int, float, str), 'Invalid action value')
             if type(a['value']) in (int, float):
                 require(math.isfinite(a['value']), 'Non-finite action value')
