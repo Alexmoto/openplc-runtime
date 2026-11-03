@@ -16,6 +16,8 @@ import sys
 
 FILES = (
     'tools/targetvisu/keypad.py',
+    'tools/targetvisu/graphics.py',
+    'tools/targetvisu/render.py',
     'tools/targetvisu/model.py',
     'tools/targetvisu/viewer.py',
 )
@@ -52,6 +54,8 @@ def main():
         required = {
             'tools/targetvisu/keypad.py': 'def show(window, element, model, current):',
             'tools/targetvisu/model.py': "mode == 'input-output'",
+            'tools/targetvisu/graphics.py': 'def select_graphic_data(',
+            'tools/targetvisu/render.py': "screen.get('backgroundGraphic')",
             'tools/targetvisu/viewer.py': 'show_numeric_keypad(window, element, model, current)',
         }[rel]
         if required not in data:
