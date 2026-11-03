@@ -6,7 +6,7 @@ import sys
 import unittest
 import zlib
 from unittest.mock import patch
-from targetvisu.graphics import PNG_PREFIX, png_bytes, validate_graphic, placement, draw_graphic, _surface
+from targetvisu.graphics import PNG_PREFIX, png_bytes, validate_graphic, placement, draw_graphic, select_graphic_data, _surface
 from targetvisu.model import Model
 from targetvisu.tests.test_targetvisu import fixture
 
@@ -38,6 +38,47 @@ class GraphicTests(unittest.TestCase):
         self.assertEqual(model.elements[e['id']]['graphic']['data'],data_url())
         del e['graphic']
         with self.assertRaises(ValueError):Model(doc,dict(version=2,md5=original.md5,leaves=list(original.leaves.values())))
+
+    def test_image_state_selector_and_backwards_compatibility(self):
+        default = data_url()
+        image = {'data': default, 'fit': 'contain',
+                 'variants': [{'value': 0, 'data': default},
+                              {'value': 1, 'data': default}]}
+        validate_graphic(image)
+        self.assertEqual(select_graphic_data(image, 0, True), image['variants'][0]['data'])
+        self.assertEqual(select_graphic_data(image, True, True), image['variants'][1]['data'])
+        self.assertEqual(select_graphic_data(image, 9, True), default)
+        self.assertEqual(select_graphic_data(image, None, True), default)
+        no_default = dict(image, data='')
+        validate_graphic(no_default)
+        self.assertEqual(select_graphic_data(no_default, 9, True), '')
+        self.assertEqual(select_graphic_data(no_default, None, False), image['variants'][0]['data'])
+        for invalid in [
+            dict(image, variants=[image['variants'][0], image['variants'][0]]),
+            dict(image, variants=[dict(value=True, data=default)]),
+            dict(image, variants=[dict(value=1, data='file:///etc/passwd')]),
+            dict(image, variants=[dict(value=4294967296, data=default)]),
+            dict(image, variants=[dict(value=1, data=default, url='http://bad')]),
+            dict(image, variants=[dict(value=i, data=default) for i in range(17)]),
+        ]:
+            with self.assertRaises(ValueError):
+                validate_graphic(invalid)
+        validate_graphic({'data': default, 'fit': 'contain'})  # legacy project
+
+    def test_graphic_selector_binding_validation(self):
+        original = fixture()
+        data = dict(version=2, md5=original.md5, leaves=list(original.leaves.values()))
+        doc = copy.deepcopy(original.doc)
+        e = doc['screens'][0]['elements'][0]
+        e.update(kind='graphic',
+                 graphic={'data': data_url(), 'fit': 'contain',
+                          'variants': [{'value': 1, 'data': data_url()}]},
+                 bindings={'value': 'Pump1.Running', 'visible': '', 'enabled': ''},
+                 action={'kind': 'none', 'target': '', 'value': True})
+        Model(doc, data)
+        e['bindings']['value'] = 'Pump1.Pressure'
+        with self.assertRaisesRegex(ValueError, 'image selector'):
+            Model(doc, data)
 
     def test_placement(self):
         self.assertEqual(placement(200,100,100,100,'contain'),(0,25,0.5,0.5))
