@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "target": "native-x11",
+  "refreshMs": 250,
+  "startScreen": "main-screen",
+  "screens": [
+    {
+      "id": "main-screen",
+      "name": "MainScreen",
+      "width": 800,
+      "height": 480,
+      "background": "#f3f5f7",
+      "grid": 10,
+      "elements": [
+        {
+          "id": "Start",
+          "name": "Start",
+          "kind": "button",
+          "lineDirection": "horizontal",
+          "x": 24,
+          "y": 306,
+          "width": 232,
+          "height": 64,
+          "fill": "#2563eb",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#ffffff",
+          "fontSize": 18,
+          "text": "Details →",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "navigate",
+            "target": "Details",
+            "value": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "Details",
+      "name": "Details",
+      "width": 800,
+      "height": 480,
+      "background": "#f3f5f7",
+      "grid": 10,
+      "elements": [
+        {
+          "id": "back-to-main",
+          "name": "Back",
+          "kind": "button",
+          "lineDirection": "horizontal",
+          "x": 24,
+          "y": 306,
+          "width": 232,
+          "height": 64,
+          "fill": "#2563eb",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#ffffff",
+          "fontSize": 18,
+          "text": "← Main",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "navigate",
+            "target": "main-screen",
+            "value": true
+          }
+        }
+      ]
+    }
+  ]
+}

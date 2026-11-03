@@ -1,0 +1,65 @@
+{
+  "files": {
+    "src/backend/shared/compile/pipeline.ts": {
+      "before": [
+        "f856387792cffa312c424eec6f47d12225a14cac5f983448a5e0f1d1b0e889b5",
+        "8f71cadd30044ecbf8d71b29f1bffe0446944a411826e9c4b67a9aec61c36f12"
+      ],
+      "after": "8f71cadd30044ecbf8d71b29f1bffe0446944a411826e9c4b67a9aec61c36f12"
+    },
+    "src/middleware/adapters/editor/compiler-adapter.ts": {
+      "before": [
+        "a4eb6b0038b1af6551d2032cd02e791c53866930784f90ec963b787eb5c59807",
+        "16027acd5e8974ab0b6f2f52e561c4385eae19ef13d57ec255c6f1737f3d4ca6"
+      ],
+      "after": "16027acd5e8974ab0b6f2f52e561c4385eae19ef13d57ec255c6f1737f3d4ca6"
+    },
+    "src/middleware/shared/utils/library/compose-runtime-v4-bundle.ts": {
+      "before": [
+        "534ba7383f8b4786e47ee92182ff694351cb409dc371ad64353315872efd29b9",
+        "ff2621e743a33b9205088d1d4d67357cf372676f9f9d8c0c14b45d902791c541"
+      ],
+      "after": "ff2621e743a33b9205088d1d4d67357cf372676f9f9d8c0c14b45d902791c541"
+    },
+    "src/backend/shared/compile/steps/generate-targetvisu.ts": {
+      "before": [
+        null,
+        "0f9243b9cb3a4e9a699c319fb1eae4283b67be08df84050b4e93f61f6ff08ec9"
+      ],
+      "after": "4bcf9b2800245d1e2767623108347a6319eac797704099c4ea8e789a8e0c001c"
+    },
+    "src/backend/shared/compile/steps/__tests__/generate-targetvisu.test.ts": {
+      "before": [
+        null,
+        "cc4a4a4014cd8603a7be3afce357b5ae05f001addac5d7ef32409db48416755a"
+      ],
+      "after": "7c8110a5a0e92a50b7ccc854fe2a64ed5ee2f7b623c955b5135dc7efc8ac3eb2"
+    },
+    "src/middleware/shared/targetvisu/model.ts": {
+      "before": [
+        "24bfb007c43a943b3bfcdca5434549cf48f38c9599c1cf38c472470960b82c35"
+      ],
+      "after": "778eefa56aba4b044e08555e2023e7a0dbd8ee480f95b43357b6c573e879fbac"
+    },
+    "src/frontend/components/_features/[workspace]/editor/targetvisu/designer.tsx": {
+      "before": [
+        "3451c0d43198483a5fd564203e9358bb8b04cd8c3189d59c252437ccd6af82a8"
+      ],
+      "after": "a3cbfc289dfb69f6250bdeeb239d107516d41ba3106428829eb73a9f2b55ac1e"
+    },
+    "src/frontend/components/_features/[workspace]/editor/targetvisu/__tests__/designer.test.tsx": {
+      "before": [
+        "58b1b7127e07b68860b061ab7a6a271988d8fa91a7f84a17c1e3886eec6f775f"
+      ],
+      "after": "f9442573a276d89d7111bea64b5e7df02690aa3047c5ffcfb29778acc1349a20"
+    }
+  },
+  "dependencies": {
+    "src/middleware/shared/targetvisu/symbols.ts": [
+      "de03d03d635804684f34b79eaee77f38425af7a8bf83eda16a9d46a574d507a5"
+    ],
+    "src/frontend/components/_features/[workspace]/editor/targetvisu/index.tsx": [
+      "18502d240d3c0bfdc14458a54fefdc043844c515999c72253675648f61a29b47"
+    ]
+  }
+}
