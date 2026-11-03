@@ -80,6 +80,53 @@ class GraphicTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'image selector'):
             Model(doc, data)
 
+    def test_screen_background_image_validation_and_rendering(self):
+        from targetvisu.render import draw as draw_screen
+        original = fixture()
+        doc = copy.deepcopy(original.doc)
+        debug_map = dict(version=2, md5=original.md5, leaves=list(original.leaves.values()))
+        screen = doc['screens'][0]
+        # Legacy screens without an image remain valid.
+        Model(doc, debug_map)
+        screen['backgroundGraphic'] = {'data': data_url(), 'fit': 'stretch'}
+        model = Model(doc, debug_map)
+        self.assertEqual(model.doc['screens'][0]['backgroundGraphic']['fit'], 'stretch')
+        for bad in [
+            {'data': 'file:///tmp/bg.png', 'fit': 'cover'},
+            {'data': data_url(), 'fit': 'other'},
+            {'data': data_url(), 'fit': 'cover', 'variants': []},
+            {'data': '', 'fit': 'cover'},
+        ]:
+            screen['backgroundGraphic'] = bad
+            with self.assertRaises(ValueError):
+                Model(doc, debug_map)
+        screen['backgroundGraphic'] = {'data': data_url(), 'fit': 'stretch'}
+        screen['elements'] = []
+        try:
+            import cairo
+        except ImportError:
+            try: import cairocffi as cairo
+            except ImportError: self.skipTest('Cairo unavailable')
+        with patch.dict(sys.modules, {'cairo': cairo}):
+            _surface.cache_clear()
+            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 160, 120)
+            ctx = cairo.Context(surface)
+            screen['width'], screen['height'] = 160, 120
+            screen['background'] = '#0000ff'
+            draw_screen(ctx, model, screen, {}, True, 160, 120)
+            surface.flush()
+            pixels = bytes(surface.get_data())
+            stride = surface.get_stride()
+            def pixel(x, y):
+                i = y * stride + x * 4
+                return pixels[i:i+4]  # BGRA on little-endian CI hosts
+            red = pixel(20, 60)
+            blue = pixel(140, 60)
+            self.assertGreater(red[2], 190)   # opaque red PNG on the left
+            self.assertLess(red[0], 80)
+            self.assertGreater(blue[0], 190)  # transparent PNG on the right keeps blue fill
+            _surface.cache_clear()
+
     def test_placement(self):
         self.assertEqual(placement(200,100,100,100,'contain'),(0,25,0.5,0.5))
         self.assertEqual(placement(200,100,100,100,'cover'),(-50,0,1,1))
