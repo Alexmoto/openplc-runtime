@@ -19,20 +19,12 @@ def run(model, broker_path, fullscreen=False, demo=False):
         raise RuntimeError('Cannot open X11 display; connect with ssh -Y and check DISPLAY')
     window = Gtk.Window(title='OpenPLC TargetVisu' + (' — DEMO' if demo else ''))
     initial = next(s for s in model.doc['screens'] if s['id'] == model.doc['startScreen'])
-    window.set_default_size(initial['width'], initial['height'] + 64)
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-    window.add(box)
-    bar = Gtk.Box(spacing=8)
-    bar.set_border_width(4)
-    status = Gtk.Label(label='Connecting…')
-    status.set_ellipsize(3)
-    bar.pack_start(status, True, True, 0)
-    box.pack_start(bar, False, False, 0)
+    window.set_default_size(initial['width'], initial['height'])
     canvas = Gtk.DrawingArea()
     canvas.set_can_focus(True)
     canvas.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
                       Gdk.EventMask.LEAVE_NOTIFY_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
-    box.pack_start(canvas, True, True, 0)
+    window.add(canvas)
     state = dict(screen=initial, values={}, online=False, pressed=None)
     commands = queue.Queue(maxsize=32)
     closed = threading.Event()
@@ -43,10 +35,8 @@ def run(model, broker_path, fullscreen=False, demo=False):
             return False
         if error:
             state.update(online=False, values={}, pressed=None)
-            status.set_text('OFFLINE — ' + error)
         else:
             state.update(online=reply['online'], values=reply['values'])
-            status.set_text(('DEMO — ' if demo else '') + ('RUN' if reply['online'] else 'OFFLINE — ' + reply['error']))
         canvas.queue_draw()
         return False
 
@@ -58,7 +48,6 @@ def run(model, broker_path, fullscreen=False, demo=False):
             disconnect.set()
             state['online'] = False
             state['pressed'] = None
-            status.set_text('Command queue full')
 
     def worker():
         client = None
