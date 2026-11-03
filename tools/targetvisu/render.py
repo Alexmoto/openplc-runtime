@@ -52,6 +52,13 @@ def draw(ctx, model, screen, values, online, width, height, pressed=None):
     ctx.clip()
     ctx.set_source_rgb(*rgb(screen['background']))
     ctx.paint()
+    if screen.get('backgroundGraphic'):
+        # Paint the background under every element, preserving transparency and clipping.
+        draw_graphic(ctx, {
+            'x': 0, 'y': 0,
+            'width': screen['width'], 'height': screen['height'],
+            'graphic': screen['backgroundGraphic'],
+        })
     for e in screen['elements']:
         if not model.visible(e, values):
             continue
