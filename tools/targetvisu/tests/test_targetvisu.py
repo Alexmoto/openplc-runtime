@@ -74,6 +74,36 @@ class ModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'borderRadius'):
             Model(doc, debug_map)
 
+    def test_transparent_button_and_number_keep_full_hit_area(self):
+        m = fixture()
+        doc = copy.deepcopy(m.doc)
+        debug_map = load_json(ROOT / 'example.debug-map.json')
+        screen = doc['screens'][0]
+        button = next(e for e in screen['elements'] if e['kind'] == 'button')
+        numeric = next(e for e in screen['elements'] if e['kind'] == 'number')
+        button['fillTransparent'] = True
+        button['strokeTransparent'] = True
+        numeric['fillTransparent'] = True
+        numeric['strokeTransparent'] = False
+        screen['elements'] = [numeric, button]
+        model = Model(doc, debug_map)
+        button['action'] = dict(kind='toggle', target='Pump1.StartRequest', value=True)
+        # Every point inside the rectangular button (including corners) can trigger its action.
+        for x, y in ((button['x'] + 1, button['y'] + 1),
+                     (button['x'] + button['width'] / 2, button['y'] + button['height'] / 2),
+                     (button['x'] + button['width'] - 1, button['y'] + button['height'] - 1)):
+            self.assertIs(hit(model, screen, {}, x, y), button)
+        button.pop('fillTransparent')
+        button.pop('strokeTransparent')
+        Model(doc, debug_map)  # older projects are compatible
+        button['fillTransparent'] = 'true'
+        with self.assertRaisesRegex(ValueError, 'fillTransparent'):
+            Model(doc, debug_map)
+        button['fillTransparent'] = True
+        numeric['kind'] = 'text'
+        with self.assertRaisesRegex(ValueError, 'fillTransparent'):
+            Model(doc, debug_map)
+
     def test_unknown_symbol_no_address_guess(self):
         m = fixture()
         doc = copy.deepcopy(m.doc)
