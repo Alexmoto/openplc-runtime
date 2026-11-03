@@ -164,6 +164,16 @@ def run(model, broker_path, fullscreen=False, demo=False):
     def destroy(*_):
         closed.set()
         Gtk.main_quit()
+    def hide_cursor(widget):
+        # Apply after realization, when the native X11 window exists.
+        native_window = widget.get_window()
+        if native_window is not None:
+            native_window.set_cursor(
+                Gdk.Cursor.new_for_display(widget.get_display(), Gdk.CursorType.BLANK_CURSOR)
+            )
+
+    window.connect('realize', hide_cursor)
+    canvas.connect('realize', hide_cursor)
     canvas.connect('draw', paint)
     canvas.connect('button-press-event', clicked)
     canvas.connect('button-release-event', release)
