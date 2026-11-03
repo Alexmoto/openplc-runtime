@@ -54,6 +54,11 @@ def document(raw):
         number(screen.get('height'), 120, 8192, 'screen height', True)
         number(screen.get('grid'), 1, 100, 'grid', True)
         color(screen, 'background')
+        if 'backgroundGraphic' in screen:
+            background_graphic = screen['backgroundGraphic']
+            require(isinstance(background_graphic, dict) and
+                    set(background_graphic) == {'data', 'fit'}, 'Invalid screen background image properties')
+            validate_graphic(background_graphic)
         elements = screen.get('elements')
         require(isinstance(elements, list) and len(elements) <= 1000, 'Too many elements')
         for e in elements:
