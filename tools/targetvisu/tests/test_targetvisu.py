@@ -48,6 +48,32 @@ class ModelTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Model(doc, load_json(ROOT / 'example.debug-map.json'))
 
+    def test_number_dynamic_colors_and_legacy_defaults(self):
+        from targetvisu.render import bound_color, rounded_rect
+        original = fixture()
+        doc = copy.deepcopy(original.doc)
+        e = next(e for e in doc['screens'][0]['elements'] if e['kind'] == 'number')
+        # Missing new fields remain supported by the Runtime.
+        e.pop('borderRadius', None)
+        e['bindings'].pop('fill', None)
+        e['bindings'].pop('stroke', None)
+        e['bindings'].pop('textColor', None)
+        debug_map = load_json(ROOT / 'example.debug-map.json')
+        Model(doc, debug_map)
+        e['borderRadius'] = 12
+        self.assertEqual(bound_color(original, e, 'fill', {}), e['fill'])
+        e['bindings']['fill'] = 'Pump1.Pressure'
+        with self.assertRaisesRegex(ValueError, 'integer PLC variable'):
+            Model(doc, debug_map)
+        leaf = next(leaf for leaf in debug_map['leaves'] if leaf['path'].lower() == 'pump1.pressure')
+        leaf['type'], leaf['size'] = 'DWORD', 4
+        model = Model(doc, debug_map)
+        self.assertEqual(bound_color(model, e, 'fill', {'pump1.pressure': 0x12AB34}), '#12ab34')
+        self.assertEqual(bound_color(model, e, 'fill', {}), e['fill'])
+        e['borderRadius'] = 101
+        with self.assertRaisesRegex(ValueError, 'borderRadius'):
+            Model(doc, debug_map)
+
     def test_unknown_symbol_no_address_guess(self):
         m = fixture()
         doc = copy.deepcopy(m.doc)
