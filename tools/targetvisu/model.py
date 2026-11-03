@@ -70,6 +70,7 @@ def document(raw):
                 number(e.get(key), 8, 8192, key)
             require(e['x'] + e['width'] <= screen['width'] and e['y'] + e['height'] <= screen['height'], 'Element exceeds screen')
             number(e.get('strokeWidth'), 0, 20, 'strokeWidth')
+            number(e.get('borderRadius', 0), 0, 100, 'borderRadius')
             number(e.get('fontSize'), 6, 200, 'fontSize', True)
             number(e.get('decimals'), 0, 6, 'decimals', True)
             number(e.get('minimum'), -float('inf'), float('inf'), 'minimum')
@@ -79,6 +80,10 @@ def document(raw):
             require(isinstance(e.get('bindings'), dict), 'Missing bindings')
             for key in ('value', 'visible', 'enabled'):
                 require(isinstance(e['bindings'].get(key), str) and len(e['bindings'][key]) <= 256, 'Invalid binding')
+            for key in ('fill', 'stroke', 'textColor'):
+                binding = e['bindings'].get(key, '')
+                require(isinstance(binding, str) and len(binding) <= 256, 'Invalid color binding')
+                require(not binding or e['kind'] == 'number', 'Color bindings require Number')
             a = e.get('action', {})
             require(isinstance(a, dict), 'Invalid action object')
             if e['kind'] == 'graphic':
@@ -128,6 +133,10 @@ class Model:
                         require(leaf['type'] == 'BOOL', f'{path} must be BOOL')
                     if key == 'value' and e['kind'] == 'number':
                         require(leaf['type'] in FORMATS and leaf['type'] != 'BOOL', f'{path} must be numeric')
+                    if key in ('fill', 'stroke', 'textColor'):
+                        require(e['kind'] == 'number' and leaf['type'] in FORMATS and
+                                leaf['type'] not in ('BOOL', 'REAL', 'LREAL'),
+                                f'{path}: color binding requires integer PLC variable')
                     self.paths.add(path.lower())
             a = e['action']
             if a['kind'] not in ('none', 'navigate'):
@@ -174,7 +183,7 @@ class Model:
         return struct.unpack(endian + FORMATS[self.leaf(path)['type']], value)[0]
 
     def bound(self, e, key, values, default=None):
-        path = e['bindings'][key]
+        path = e['bindings'].get(key, '')
         return values.get(path.lower(), default) if path else default
 
     def visible(self, e, values):
