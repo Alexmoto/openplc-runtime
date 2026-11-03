@@ -1,9 +1,10 @@
-name: TargetVisu Number regression
+name: TargetVisu visual regression
 on:
   pull_request:
     paths:
       - 'tools/targetvisu/**'
       - 'updates/targetvisu-number-v0.6.0/**'
+      - 'updates/targetvisu-graphic-v0.7.0/**'
       - '.github/workflows/ci-targetvisu-number.yml'
   push:
     paths:
@@ -20,9 +21,13 @@ jobs:
           python-version: '3.11'
       - name: Verify Runtime and installer Python syntax
         run: |
-          python -m py_compile tools/targetvisu/model.py tools/targetvisu/render.py updates/targetvisu-number-v0.6.0/install_update.py
-      - name: Test Number bindings and backward compatibility
+          python -m py_compile tools/targetvisu/model.py tools/targetvisu/render.py tools/targetvisu/graphics.py updates/targetvisu-number-v0.6.0/install_update.py updates/targetvisu-graphic-v0.7.0/install_update.py
+      - name: Test Number bindings, Graphic View states, and backward compatibility
         env:
           PYTHONPATH: tools
-        run: |
-          python -m unittest targetvisu.tests.test_targetvisu.ModelTests.test_number_dynamic_colors_and_legacy_defaults -v
+        run: >-
+          python -m unittest
+          targetvisu.tests.test_targetvisu.ModelTests.test_number_dynamic_colors_and_legacy_defaults
+          targetvisu.tests.test_graphics.GraphicTests.test_image_state_selector_and_backwards_compatibility
+          targetvisu.tests.test_graphics.GraphicTests.test_graphic_selector_binding_validation
+          -v

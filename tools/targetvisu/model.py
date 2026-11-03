@@ -133,6 +133,10 @@ class Model:
                         require(leaf['type'] == 'BOOL', f'{path} must be BOOL')
                     if key == 'value' and e['kind'] == 'number':
                         require(leaf['type'] in FORMATS and leaf['type'] != 'BOOL', f'{path} must be numeric')
+                    if key == 'value' and e['kind'] == 'graphic':
+                        require(leaf['type'] in ('BOOL', 'SINT', 'INT', 'DINT', 'USINT', 'UINT',
+                                                 'UDINT', 'BYTE', 'WORD', 'DWORD'),
+                                f'{path}: image selector requires BOOL or 32-bit integer PLC variable')
                     if key in ('fill', 'stroke', 'textColor'):
                         require(e['kind'] == 'number' and leaf['type'] in FORMATS and
                                 leaf['type'] not in ('BOOL', 'REAL', 'LREAL'),
