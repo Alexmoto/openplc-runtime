@@ -28,11 +28,42 @@ def png_bytes(data):
 
 
 def validate_graphic(graphic):
-    if not isinstance(graphic, dict) or set(graphic) != {'data', 'fit'}:
+    if not isinstance(graphic, dict) or not {'data', 'fit'} <= set(graphic) or not set(graphic) <= {'data', 'fit', 'variants'}:
         raise ValueError('Invalid graphic properties')
     if graphic['fit'] not in ('contain', 'cover', 'stretch'):
         raise ValueError('Invalid graphic scaling mode')
-    png_bytes(graphic['data'])
+    default = graphic['data']
+    if not isinstance(default, str):
+        raise ValueError('Invalid default image')
+    if default:
+        png_bytes(default)
+    variants = graphic.get('variants', [])
+    if not isinstance(variants, list) or len(variants) > 16:
+        raise ValueError('Invalid image states')
+    used = set()
+    for variant in variants:
+        if not isinstance(variant, dict) or set(variant) != {'value', 'data'}:
+            raise ValueError('Invalid image state')
+        value = variant['value']
+        if type(value) is not int or not -2147483648 <= value <= 4294967295 or value in used:
+            raise ValueError('Duplicate or invalid image state value')
+        used.add(value)
+        png_bytes(variant['data'])
+    if not default and not variants:
+        raise ValueError('Graphic image is missing')
+
+
+def select_graphic_data(graphic, selector=None, has_binding=False):
+    """Use an exact BOOL/integer state, otherwise the optional fallback PNG."""
+    if not has_binding:
+        return graphic['data'] or next((v['data'] for v in graphic.get('variants', [])), '')
+    if type(selector) is bool:
+        selector = int(selector)
+    if type(selector) is int:
+        for variant in graphic.get('variants', []):
+            if variant['value'] == selector:
+                return variant['data']
+    return graphic['data']
 
 
 def placement(iw, ih, w, h, fit):
@@ -52,9 +83,10 @@ def _surface(data):
         return None
 
 
-def draw_graphic(ctx, element):
+def draw_graphic(ctx, element, selector=None, has_binding=False):
     graphic = element['graphic']
-    surface = _surface(graphic['data'])
+    data = select_graphic_data(graphic, selector, has_binding)
+    surface = _surface(data) if data else None
     x, y, w, h = (element[k] for k in ('x', 'y', 'width', 'height'))
     ctx.save()
     ctx.rectangle(x, y, w, h)
