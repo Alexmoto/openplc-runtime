@@ -88,10 +88,13 @@ def draw(ctx, model, screen, values, online, width, height, pressed=None):
         elif e['kind'] != 'text':
             ctx.rectangle(x, y, w, h)
         if e['kind'] != 'text':
-            if e['kind'] != 'line':
-                ctx.set_source_rgb(*rgb(fill)); ctx.fill_preserve()
-            ctx.set_source_rgb(*rgb(stroke)); ctx.set_line_width(e['strokeWidth'])
-            if e['strokeWidth']:
+            transparent_kind = e['kind'] in ('button', 'number')
+            if e['kind'] != 'line' and not (transparent_kind and e.get('fillTransparent', False)):
+                ctx.set_source_rgb(*rgb(fill))
+                ctx.fill_preserve()
+            if e['strokeWidth'] and not (transparent_kind and e.get('strokeTransparent', False)):
+                ctx.set_source_rgb(*rgb(stroke))
+                ctx.set_line_width(e['strokeWidth'])
                 ctx.stroke()
             else:
                 ctx.new_path()
