@@ -1,0 +1,28 @@
+[project]
+name = "openplc-runtime"
+version = "0.1.0"
+description = "OpenPLC Runtime"
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=64", "wheel", "packaging>=24.2"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["webserver"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.format]
+# Use double quotes for strings (same as black)
+quote-style = "double"
+# Indent with spaces (same as black)
+indent-style = "space"
+# Respect magic trailing commas (same as black)
+skip-magic-trailing-comma = false
+# Use Unix line endings
+line-ending = "lf"
+
+[tool.black]
+line-length = 100

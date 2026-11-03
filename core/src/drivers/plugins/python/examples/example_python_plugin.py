@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (c) 2026 Autonomy®
+
+"""
+Example plugin for testing the updated python_plugin_get_symbols function
+This demonstrates the expected functions that should be present in a Python plugin
+"""
+
+from concurrent.futures import thread
+import time
+import ctypes
+from ctypes import *
+import threading
+import sys
+import os
+
+# Add the parent directory to Python path to find shared module
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# Import the correct type definitions
+from shared import (
+    PluginRuntimeArgs,
+    safe_extract_runtime_args_from_capsule,
+    SafeBufferAccess,
+    SafeLoggingAccess,
+    PluginStructureValidator,
+)
+
+# Global variable to track initialization
+_initialized = False
+_runtime_args = None
+_safe_buffer_access = None
+_safe_logging_access = None
+_mainthread = None
+_stop = threading.Event()
+
+
+def init(runtime_args_capsule):
+    """
+    Plugin initialization function
+    Called once when the plugin is loaded
+
+    Args:
+        runtime_args_capsule: PyCapsule containing plugin_runtime_args_t structure
+    """
+    global _initialized, _runtime_args, _safe_buffer_access, _safe_logging_access
+
+    print("Python plugin 'example_plugin' initializing...")
+
+    try:
+        # Print structure validation info for debugging
+        print("Validating plugin structure alignment...")
+        PluginStructureValidator.print_structure_info()
+
+        # Extract runtime args from capsule using safe method
+        runtime_args, error_msg = safe_extract_runtime_args_from_capsule(runtime_args_capsule)
+        if runtime_args is None:
+            print(f"(FAIL) Failed to extract runtime args: {error_msg}")
+            return False
+
+        print(f"(PASS) Runtime arguments extracted successfully")
+
+        # Create safe logging access wrapper first (needed for error reporting)
+        _safe_logging_access = SafeLoggingAccess(runtime_args)
+
+        # Test logging functions - demonstrate plugin logging capabilities using SafeLoggingAccess
+        if _safe_logging_access.is_valid:
+            success, msg = _safe_logging_access.log_info("Python plugin initialization started")
+            if success:
+                _safe_logging_access.log_debug(
+                    "Plugin received buffer_size={}, bits_per_buffer={}".format(
+                        runtime_args.buffer_size, runtime_args.bits_per_buffer
+                    )
+                )
+            else:
+                print(f"(WARN) Logging failed: {msg}")
+        else:
+            print(f"(WARN) SafeLoggingAccess not available: {_safe_logging_access.error_msg}")
+
+        # Safely access buffer size using validation
+        buffer_size, size_error = runtime_args.safe_access_buffer_size()
+        if buffer_size == -1:
+            print(f"(FAIL) Failed to access buffer size: {size_error}")
+            if _safe_logging_access.is_valid:
+                _safe_logging_access.log_error(f"Failed to access buffer size: {size_error}")
+            return False
+
+        # Through the logger, not print(). This file is what vendors copy, and
+        # a print() from a plugin goes to whatever stdout the runtime happens
+        # to have rather than the central log the operator is reading.
+        _safe_logging_access.log_info(f"Buffer size (smallest table): {buffer_size}")
+        _safe_logging_access.log_info(f"Bits per buffer: {runtime_args.bits_per_buffer}")
+
+        # Create safe buffer access wrapper
+        _safe_buffer_access = SafeBufferAccess(runtime_args)
+        if not _safe_buffer_access.is_valid:
+            print(f"(FAIL) Failed to create safe buffer access: {_safe_buffer_access.error_msg}")
+            if _safe_logging_access.is_valid:
+                _safe_logging_access.log_error(
+                    f"Failed to create safe buffer access: {_safe_buffer_access.error_msg}"
+                )
+            return False
+
+        # Store runtime args for later use
+        _runtime_args = runtime_args
+
+        print("(PASS) Plugin initialized successfully")
+
+        if _safe_logging_access.is_valid:
+            success, msg = _safe_logging_access.log_info(
+                "Python plugin initialization completed successfully"
+            )
+            if not success:
+                print(f"(WARN) Final logging failed: {msg}")
+
+        return True
+
+    except Exception as e:
+        print(f"(FAIL) Plugin initialization failed: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return False
+
+
+def start_loop():
+    """
+    Called when the plugin loop should start
+    Optional function - not all plugins need this
+    """
+
+    def loop():
+        global _runtime_args, _stop
+        print("Plugin start_loop called")
+        while not _stop.is_set():
+            time.sleep(1)
+            continue
+
+    global _mainthread
+    _mainthread = threading.Thread(target=loop, daemon=True)
+    _mainthread.start()
+    return 0
+
+
+def stop_loop():
+    """
+    Called when the plugin loop should stop
+    Optional function - not all plugins need this
+    """
+    print("Plugin stop_loop called")
+    global _mainthread
+    if _mainthread is not None:
+        print("Stopping main thread...")
+        # In a real implementation, you would signal the thread to stop gracefully
+        _stop.set()
+        _mainthread.join()
+        _mainthread = None
+        print("(PASS) Main thread stopped")
+
+
+def cleanup():
+    """
+    Plugin cleanup function
+    Called when the plugin is being unloaded
+    Optional function - use for cleanup tasks
+    """
+    global _initialized, _runtime_args, _safe_buffer_access, _safe_logging_access
+
+    print("Plugin cleanup called")
+
+    _initialized = False
+    _runtime_args = None
+    _safe_buffer_access = None
+    _safe_logging_access = None
+
+    print("(PASS) Plugin cleaned up successfully")
+
+
+if __name__ == "__main__":
+    print("This is an example Python plugin for OpenPLC Runtime")
+    print("Expected functions:")
+    print("  - init(runtime_args_capsule) -> bool")
+    print("  - start_loop() -> None (optional)")
+    print("  - stop_loop() -> None (optional)")
+    print("  - run_cycle() -> None (optional)")
+    print("  - cleanup() -> None (optional)")
+    print()
+    print("This file should be loaded by the OpenPLC plugin system")

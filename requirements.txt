@@ -1,0 +1,12 @@
+Flask
+Flask-Login
+Flask-JWT-Extended>=4.6.0
+flask_sqlalchemy
+Flask-SocketIO
+PyJWT
+python-dotenv
+pytest
+pytest-flask
+pre-commit
+psutil; sys_platform != "cygwin"
+pyserial>=3.5

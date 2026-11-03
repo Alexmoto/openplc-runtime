@@ -1,0 +1,24 @@
+[
+    {
+        "name": "opcua_server",
+        "protocol": "OPC-UA",
+        "config": {
+            "endpoint": "opc.tcp://0.0.0.0:4840/freeopcua/server/",
+            "server_name": "OpenPLC OPC-UA Server",
+            "security_policy": "None",
+            "security_mode": "None",
+            "certificate": "",
+            "private_key": "",
+            "cycle_time_ms": 100,
+            "namespace": "OpenPLC",
+            "variables": [
+                {
+                    "node_name": "Led",
+                    "datatype": "Bool",
+                    "index": 21,
+                    "access": "readonly"
+                }
+            ]
+        }
+    }
+]

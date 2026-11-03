@@ -1,0 +1,78 @@
+:project:
+  :name: openplc-runtime-tests
+  :use_exceptions: FALSE
+  :use_mocks: TRUE
+  :use_test_preprocessor: :none
+  :use_backtrace: :none
+  :build_root: build/test
+  :test_file_prefix: test_
+  :release_build: FALSE # We don't need release builds for testing
+
+:paths:
+  :test:
+    - tests/**
+  :source:
+    - core/src/**
+    - -:core/src/drivers/plugins/native/s7comm/** # Exclude s7comm to avoid duplicate cJSON.c
+  :support:
+    - tests/support/**  # Include support files (stubs, mocks, helpers)
+  :include:
+    - core/src/**
+    - -:core/src/drivers/plugins/native/s7comm/**
+    - tests/support # For custom helpers or mocks if needed
+
+:defines:
+  :test:
+    - TEST
+    - MAX_PLUGINS=16   # Define MAX_PLUGINS used by plugin_driver.h
+    - UNITY_INCLUDE_DOUBLE # Enable double support in Unity
+
+:plugins:
+  :enabled:
+    - gcov
+
+# ----------------------------------------------------------------------------
+# Coverage report config (used by `ceedling gcov:all`).
+# Generates a text summary on stdout and a navigable HTML report under
+# build/gcov/. Excludes vendored code (SOEM, cJSON) and the test tree itself
+# so the numbers reflect cobertura do código de produção.
+# ----------------------------------------------------------------------------
+:gcov:
+  :utilities:
+    - gcovr
+  :summaries: FALSE          # suppress per-test stdout summaries; the
+                             # aggregated report below is what matters.
+  :reports:
+    - HtmlDetailed
+    - Text
+  :gcovr:
+    :report_include: 'core/src/.*'
+    :report_exclude: '(.*\/libs\/.*|.*\/cjson\/.*|.*\/tests\/.*|.*\/s7comm\/.*)'
+
+:cmock:
+  :mock_prefix: mock_
+  :when_no_prototypes: :warn
+  :enforce_strict_ordering: FALSE
+  :plugins:
+    - :ignore
+    - :callback
+  :treat_as:
+    uint8:    HEX8
+    uint16:   HEX16  
+    uint32:   UINT32
+    bool:     UINT8
+
+:flags:
+  :test:
+    :compile:
+      - -I/usr/include/python3.12 # From pkg-config --cflags-only-I python3-embed
+
+:libraries:
+  :test:
+    - python3.12               # From pkg-config --libs python3-embed (Ceedling adds -l)
+    - dl                       # Required by plugin_driver.c (Ceedling adds -l)
+    - pthread                  # Required by plugin_driver.c (Ceedling adds -l)
+
+:unity:
+  :includes:
+    - "unity_helper.h"

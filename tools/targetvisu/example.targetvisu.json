@@ -1,0 +1,378 @@
+{
+  "version": 1,
+  "target": "native-x11",
+  "refreshMs": 250,
+  "startScreen": "main-screen",
+  "screens": [
+    {
+      "id": "main-screen",
+      "name": "MainScreen",
+      "width": 800,
+      "height": 480,
+      "background": "#f3f5f7",
+      "grid": 10,
+      "elements": [
+        {
+          "id": "Header",
+          "name": "Header",
+          "kind": "text",
+          "lineDirection": "horizontal",
+          "x": 24,
+          "y": 20,
+          "width": 750,
+          "height": 52,
+          "fill": "#ffffff",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#0f2940",
+          "fontSize": 28,
+          "text": "PUMP STATION / CONTROL",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "none",
+            "target": "",
+            "value": true
+          }
+        },
+        {
+          "id": "PressureCard",
+          "name": "PressureCard",
+          "kind": "rectangle",
+          "lineDirection": "horizontal",
+          "x": 24,
+          "y": 94,
+          "width": 360,
+          "height": 180,
+          "fill": "#ffffff",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#172033",
+          "fontSize": 18,
+          "text": "",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "none",
+            "target": "",
+            "value": true
+          }
+        },
+        {
+          "id": "PressureLabel",
+          "name": "PressureLabel",
+          "kind": "text",
+          "lineDirection": "horizontal",
+          "x": 40,
+          "y": 108,
+          "width": 326,
+          "height": 34,
+          "fill": "#ffffff",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#172033",
+          "fontSize": 18,
+          "text": "PRESSURE · bar",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "none",
+            "target": "",
+            "value": true
+          }
+        },
+        {
+          "id": "Pressure",
+          "name": "Pressure",
+          "kind": "number",
+          "lineDirection": "horizontal",
+          "x": 54,
+          "y": 157,
+          "width": 300,
+          "height": 74,
+          "fill": "#ffffff",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 0,
+          "textColor": "#1266ba",
+          "fontSize": 42,
+          "text": "",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "Pump1.Pressure",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "none",
+            "target": "",
+            "value": true
+          }
+        },
+        {
+          "id": "StatusCard",
+          "name": "StatusCard",
+          "kind": "rectangle",
+          "lineDirection": "horizontal",
+          "x": 404,
+          "y": 94,
+          "width": 370,
+          "height": 180,
+          "fill": "#ffffff",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#172033",
+          "fontSize": 18,
+          "text": "",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "none",
+            "target": "",
+            "value": true
+          }
+        },
+        {
+          "id": "RunLabel",
+          "name": "RunLabel",
+          "kind": "text",
+          "lineDirection": "horizontal",
+          "x": 472,
+          "y": 112,
+          "width": 270,
+          "height": 38,
+          "fill": "#ffffff",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#172033",
+          "fontSize": 18,
+          "text": "PUMP RUNNING",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "none",
+            "target": "",
+            "value": true
+          }
+        },
+        {
+          "id": "RunningLamp",
+          "name": "RunningLamp",
+          "kind": "indicator",
+          "lineDirection": "horizontal",
+          "x": 432,
+          "y": 168,
+          "width": 54,
+          "height": 54,
+          "fill": "#cbd5e1",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#172033",
+          "fontSize": 18,
+          "text": "",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "Pump1.Running",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "none",
+            "target": "",
+            "value": true
+          }
+        },
+        {
+          "id": "StatusHint",
+          "name": "StatusHint",
+          "kind": "text",
+          "lineDirection": "horizontal",
+          "x": 504,
+          "y": 168,
+          "width": 236,
+          "height": 54,
+          "fill": "#ffffff",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#172033",
+          "fontSize": 18,
+          "text": "MOTOR STATUS",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "none",
+            "target": "",
+            "value": true
+          }
+        },
+        {
+          "id": "Start",
+          "name": "Start",
+          "kind": "button",
+          "lineDirection": "horizontal",
+          "x": 24,
+          "y": 306,
+          "width": 232,
+          "height": 64,
+          "fill": "#2563eb",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#ffffff",
+          "fontSize": 18,
+          "text": "START",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "set",
+            "target": "Pump1.StartRequest",
+            "value": true
+          }
+        },
+        {
+          "id": "Stop",
+          "name": "Stop",
+          "kind": "button",
+          "lineDirection": "horizontal",
+          "x": 280,
+          "y": 306,
+          "width": 232,
+          "height": 64,
+          "fill": "#b91c1c",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#ffffff",
+          "fontSize": 18,
+          "text": "STOP",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "set",
+            "target": "Pump1.StartRequest",
+            "value": false
+          }
+        },
+        {
+          "id": "Setpoint",
+          "name": "Setpoint",
+          "kind": "number",
+          "lineDirection": "horizontal",
+          "x": 538,
+          "y": 306,
+          "width": 236,
+          "height": 64,
+          "fill": "#ffffff",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#172033",
+          "fontSize": 18,
+          "text": "",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "Pump1.Setpoint",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "write",
+            "target": "Pump1.Setpoint",
+            "value": 0
+          }
+        },
+        {
+          "id": "Footer",
+          "name": "Footer",
+          "kind": "text",
+          "lineDirection": "horizontal",
+          "x": 24,
+          "y": 402,
+          "width": 750,
+          "height": 38,
+          "fill": "#ffffff",
+          "activeFill": "#22c55e",
+          "stroke": "#475569",
+          "strokeWidth": 1,
+          "textColor": "#172033",
+          "fontSize": 18,
+          "text": "OpenPLC TargetVisu • native X11",
+          "decimals": 1,
+          "minimum": 0,
+          "maximum": 100,
+          "bindings": {
+            "value": "",
+            "visible": "",
+            "enabled": ""
+          },
+          "action": {
+            "kind": "none",
+            "target": "",
+            "value": true
+          }
+        }
+      ]
+    }
+  ]
+}

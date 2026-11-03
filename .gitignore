@@ -1,0 +1,32 @@
+# Build
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+
+# Python
+__pycache__/
+*.pyc
+venv/
+venvs/
+.venv/
+
+# Backups
+*.bak
+*.bak_*
+*.backup
+
+# Logs
+*.log
+logs/
+
+# Temporary
+*.tmp
+*.swp
+*~
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key

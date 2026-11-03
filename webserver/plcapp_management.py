@@ -1,0 +1,869 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (c) 2026 Autonomy®
+
+import glob
+import os
+import shutil
+import subprocess
+import threading
+import time
+import zipfile
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Final
+
+from webserver import project_snapshot
+from webserver.config import VPP_DATA_DIR
+from webserver.image_config import (
+    IMAGE_CONF_PATH,
+    ImageConfigError,
+    describe_image_conf,
+    read_image_conf_file,
+    validate_image_conf,
+    write_image_conf_file,
+)
+from webserver.logger import get_logger
+from webserver.plugin_config_model import PluginsConfiguration
+from webserver.retain_config import (
+    RETAIN_CONF_PATH,
+    RetainConfigError,
+    read_retain_conf_file,
+    validate_flush_seconds,
+    validate_retain_path,
+    write_retain_conf_file,
+)
+from webserver.runtimemanager import RuntimeManager
+from webserver.vpp_license_debug import derive_license_path, is_inside_root
+
+logger, _ = get_logger("runtime", use_buffer=True)
+
+
+MAX_FILE_SIZE: Final[int] = 10 * 1024 * 1024  # 10 MB per file
+MAX_TOTAL_SIZE: Final[int] = 50 * 1024 * 1024  # 50 MB total
+DISALLOWED_EXT = (".exe", ".dll", ".sh", ".bat", ".js", ".vbs", ".scr")
+
+
+class BuildStatus(Enum):
+    IDLE = auto()
+    UNZIPPING = auto()
+    COMPILING = auto()
+    SUCCESS = auto()
+    FAILED = auto()
+
+
+@dataclass
+class BuildProcess:
+    status: BuildStatus = BuildStatus.IDLE
+    logs: list[str] = field(default_factory=list)
+    exit_code: int | None = None
+
+    def log(self, msg: str):
+        # logger.info(msg)
+        self.logs.append(msg)
+
+    def clear(self):
+        self.status = BuildStatus.IDLE
+        self.logs.clear()
+        self.exit_code = None
+
+
+build_state = BuildProcess()  # global-ish singleton for status
+
+
+def analyze_zip(zip_path) -> tuple[bool, list]:
+    """Analyze the ZIP file for safety before extraction."""
+    build_state.status = BuildStatus.UNZIPPING
+
+    if not zipfile.is_zipfile(zip_path):
+        build_state.log("[ERROR] Not a valid PLC Program file.\n")
+        return False, []
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        total_size = 0
+        safe = True
+        valid_files = []
+
+        for info in zf.infolist():
+            filename = info.filename
+            uncompressed_size = info.file_size
+            compressed_size = info.compress_size
+            ext = os.path.splitext(filename)[1].lower()
+
+            # Check for path traversal or absolute paths
+            if filename.startswith("/") or ".." in filename or ":" in filename:
+                # logger.warning("Dangerous path: %s", filename)
+                safe = False
+
+            # Check uncompressed size
+            if uncompressed_size > MAX_FILE_SIZE:
+                logger.warning("File too large: %s (%d bytes)", filename, uncompressed_size)
+                safe = False
+
+            # Check compression ratio (ZIP bomb detection)
+            if compressed_size > 0 and uncompressed_size / compressed_size > 1000:
+                # logger.warning("Suspicious compression ratio in %s",
+                #    filename)
+                safe = False
+
+            # Check disallowed extensions
+            if ext in DISALLOWED_EXT:
+                logger.warning("Disallowed extension: %s", filename)
+                safe = False
+
+            total_size += uncompressed_size
+            valid_files.append(info)
+
+        # Check total size
+        if total_size > MAX_TOTAL_SIZE:
+            # logger.warning("Total uncompressed size too large: %d bytes",
+            #                total_size)
+            safe = False
+
+        if safe:
+            logger.debug("ZIP file looks safe to extract (based on static checks).")
+        else:
+            logger.warning("ZIP file failed safety checks.")
+
+        return safe, valid_files
+
+
+def safe_extract(zip_path, dest_dir, valid_files):
+    """Extract files safely to a target directory.
+    - Skips macOS metadata (__MACOSX, .DS_Store)
+    - Auto-strips a single common root folder if present
+    """
+    build_state.status = BuildStatus.UNZIPPING
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        # Detect roots (ignoring macOS junk)
+        roots = set()
+        for info in valid_files:
+            if info.filename.startswith("__MACOSX/") or info.filename.endswith(".DS_Store"):
+                continue
+            parts = info.filename.split("/", 1)
+            if parts and parts[0]:
+                roots.add(parts[0])
+        strip_root = len(roots) == 1
+
+        for info in valid_files:
+            filename = info.filename
+
+            # Normalize path separators for cross-platform compatibility (Windows \ to Unix /)
+            filename = filename.replace("\\", "/")
+
+            # Skip macOS junk and directories
+            if (
+                filename.startswith("__MACOSX/")
+                or filename.endswith(".DS_Store")
+                or filename.endswith("/")
+            ):
+                continue
+
+            # Optionally strip single root folder
+            if strip_root:
+                parts = filename.split("/", 1)
+                if len(parts) == 2:
+                    filename = parts[1]
+                else:
+                    filename = parts[0]
+
+            out_path = os.path.join(dest_dir, filename)
+            out_path = os.path.abspath(out_path)
+
+            # Defence in depth: analyze_zip() already rejects ".." entries,
+            # but is_inside_root also catches prefix-sibling escapes and
+            # symlink targets a bare prefix check would miss.
+            if not is_inside_root(out_path, dest_dir):
+                # logger.warning("Skipping suspicious path: %s", filename)
+                continue
+
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+            with zf.open(info) as src, open(out_path, "wb") as dst:
+                dst.write(src.read())
+
+            logger.debug("Extracted: %s", out_path)
+
+
+def update_plugin_configurations(generated_dir: str = "core/generated"):
+    """
+    Update plugin configurations based on available config files.
+
+    Scans generated/conf/ for config files, copies them to plugin directories,
+    and updates plugins.conf to enable/disable plugins accordingly.
+    """
+    plugins_conf_path = "plugins.conf"
+    conf_dir = os.path.join(generated_dir, "conf")
+
+    build_state.log(
+        f"[DEBUG] update_plugin_configurations called with generated_dir='{generated_dir}'\n"
+    )
+    build_state.log(f"[DEBUG] Looking for config files in: {conf_dir}\n")
+
+    # Load current plugin configuration using the dataclass
+    plugins_config = PluginsConfiguration.from_file(plugins_conf_path)
+    build_state.log(
+        f"[DEBUG] Loaded {len(plugins_config.plugins)} plugins from {plugins_conf_path}\n"
+    )
+
+    # Log initial state
+    for plugin in plugins_config.plugins:
+        build_state.log(
+            f"[DEBUG] Initial state - {plugin.name}: enabled={plugin.enabled}, config_path='{plugin.config_path}'\n"
+        )
+
+    # Check if conf directory exists
+    if not os.path.exists(conf_dir):
+        build_state.log(
+            f"[INFO] No conf directory found in {generated_dir}, disabling all plugins\n"
+        )
+        # When there's no conf directory, disable all currently enabled plugins
+        plugins_updated = 0
+        update_messages = []
+        for plugin in plugins_config.plugins:
+            if plugin.enabled:
+                plugin.enabled = False
+                plugins_updated += 1
+                update_messages.append(f"Disabled plugin '{plugin.name}' (no conf directory found)")
+
+        # Log the updates
+        build_state.log("[INFO] Found 0 config files (no conf directory): []\n")
+
+        for message in update_messages:
+            build_state.log(f"[INFO] {message}\n")
+    else:
+        # Process config files normally when conf directory exists
+        # Use the utility method to update plugins based on available config files
+        # Copy config files to plugin directories instead of referencing them directly
+        plugins_updated, update_messages = plugins_config.update_plugins_from_config_dir(
+            conf_dir, copy_to_plugin_dirs=True
+        )
+
+        # Log the updates
+        config_files = glob.glob(os.path.join(conf_dir, "*.json"))
+        available_configs = {os.path.splitext(os.path.basename(f))[0]: f for f in config_files}
+        build_state.log(
+            f"[INFO] Found {len(available_configs)} config files in {conf_dir}: {list(available_configs.keys())}\n"
+        )
+
+        for message in update_messages:
+            if "Copied config file" in message:
+                build_state.log(f"[INFO] {message}\n")
+            elif "Enabled plugin" in message or "Disabled plugin" in message:
+                build_state.log(f"[INFO] {message}\n")
+            else:
+                build_state.log(f"[WARNING] {message}\n")
+
+    # VPP plugins are handled separately via vpp_plugins.conf — see
+    # apply_vpp_plugin_conf(). Nothing to do here for VPP.
+
+    # Save the updated configuration
+    if plugins_config.to_file(plugins_conf_path):
+        build_state.log(
+            f"[INFO] Plugin configuration update complete. {plugins_updated} plugins updated.\n"
+        )
+
+        # Log final state
+        for plugin in plugins_config.plugins:
+            build_state.log(
+                f"[DEBUG] Final state - {plugin.name}: enabled={plugin.enabled}, config_path='{plugin.config_path}'\n"
+            )
+
+        # Log configuration summary
+        summary = plugins_config.get_config_summary()
+        build_state.log(
+            f"[INFO] Plugin summary: {summary['enabled']}/{summary['total']} enabled "
+            f"({summary['python']} Python, {summary['native']} Native)\n"
+        )
+
+        # Validate configurations and log any issues
+        issues = plugins_config.validate_plugins()
+        if issues:
+            build_state.log("[WARNING] Plugin validation issues found:\n")
+            for issue in issues:
+                build_state.log(f"[WARNING] {issue}\n")
+    else:
+        build_state.log("[ERROR] Failed to save updated plugin configuration\n")
+
+
+def _wait_for_plc_idle(runtime_manager: RuntimeManager, timeout_s: float) -> bool:
+    """Poll status_plc() until the runtime is NOT in a transition.
+
+    The runtime reports STATUS:TRANSITIONING while a stop/start worker
+    is in flight (plc_state has flipped but the unload/load work hasn't
+    completed). Any other STATUS (STOPPED, EMPTY, INIT, RUNNING) means
+    the runtime is settled and ready to accept the next command.
+
+    Used before the cleanup script runs, so the .so move doesn't race
+    against an in-flight unload, and before sending START, so the
+    runtime can actually process the command instead of returning
+    COMMAND:BUSY. Tolerates the case where the PLC was never started
+    (state == INIT or EMPTY) — those return immediately since there's
+    no transition to wait for.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        resp = runtime_manager.status_plc()
+        if resp and "TRANSITIONING" not in resp.upper():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def ensure_plc_stopped(runtime_manager: RuntimeManager, timeout_s: float) -> tuple[bool, bool]:
+    """Stop the PLC if it is running and wait until it has stopped.
+
+    Returns (stopped, was_running). stopped is False when the PLC still runs or is still in a
+    transition after timeout_s. A runtime that cannot be reached counts as stopped: no
+    program runs.
+    """
+    if not _wait_for_plc_idle(runtime_manager, timeout_s):
+        return False, False
+    if "RUNNING" not in (runtime_manager.status_plc() or "").upper():
+        return True, False
+    runtime_manager.stop_plc()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        resp = (runtime_manager.status_plc() or "").upper()
+        if "RUNNING" not in resp and "TRANSITIONING" not in resp:
+            return True, True
+        time.sleep(0.1)
+    return False, True
+
+
+def validate_vpp_plugins_conf(conf_path: str, runtime_root: str, vpp_build_dir: str) -> tuple[bool, str]:
+    """Containment check for an upload-supplied ``vpp_plugins.conf``.
+
+    The ``path`` field of this file is what the C plugin loader passes straight
+    to ``dlopen`` (``core/src/drivers/plugin_driver.c``). It arrives verbatim
+    from the upload, and until this existed only ``config_path`` was checked --
+    so a forged conf could name ANY .so on the filesystem, including one the
+    attacker left there by an unrelated route, and verifying the plugin the
+    build produced would have proved nothing about the object actually loaded.
+
+    Two rules, and the whole file is refused if either is broken (rather than
+    dropping the offending line): a conf that tries to escape is not a conf we
+    want to partially honour, and leaving the rest installed would silently
+    load a subset of what the editor intended.
+
+    1. ``path`` must resolve inside the runtime root -- same
+       ``is_inside_root`` definition (symlink-resolving) every other write path
+       here uses.
+    2. ``path`` must resolve inside ``build/vpp/``. That is the only directory
+       compile.sh writes VPP artefacts into, and the only one whose contents
+       the compile-time seal covers, so anything outside it is by definition
+       unverified.
+
+    The C side repeats rule 1's spirit in ``parse_plugin_config_contained`` --
+    on purpose, so containment does not depend on Python alone.
+    """
+    plugins_conf = PluginsConfiguration.from_file(conf_path)
+    vpp_root = os.path.abspath(os.path.join(runtime_root, vpp_build_dir))
+
+    def against_root(candidate: str) -> str:
+        """Resolve a conf path the way the C loader will: relative entries are
+        relative to the runtime root (which is the loader's cwd). Resolving
+        against the process cwd instead would make the guard depend on where
+        the caller happened to be."""
+        return os.path.join(runtime_root, candidate)
+
+    for p in plugins_conf.plugins:
+        if not p.path:
+            return False, f"plugin '{p.name}' has an empty path"
+        if os.path.isabs(p.path):
+            # Must match plugin_config.c (require_contained=1), which rejects
+            # every absolute path. Accepting one here would silently drop the
+            # VPP at C-loader parse time with no feedback.
+            return False, (
+                f"plugin '{p.name}' path '{p.path}' is absolute -- plugin paths "
+                f"must be relative to the runtime root (./build/vpp/...)"
+            )
+        plugin_path = against_root(p.path)
+        if not is_inside_root(plugin_path, runtime_root):
+            return False, f"plugin '{p.name}' path '{p.path}' escapes the runtime root"
+        if not is_inside_root(plugin_path, vpp_root):
+            return False, (
+                f"plugin '{p.name}' path '{p.path}' is outside {vpp_build_dir}/ "
+                "(VPP plugins may only load objects built by this upload)"
+            )
+        if p.config_path and not is_inside_root(against_root(p.config_path), runtime_root):
+            return (
+                False,
+                f"plugin '{p.name}' config_path '{p.config_path}' escapes the runtime root",
+            )
+    return True, ""
+
+
+def apply_vpp_plugin_conf(generated_dir: str = "core/generated") -> None:
+    """Apply or remove the VPP plugin configuration for this upload.
+
+    VPP plugins are fully owned by the editor: it sends a
+    ``vpp_plugins.conf`` alongside the program when the target is a VPP
+    board, and omits it for vanilla builds.  This function is the single
+    authoritative gate:
+
+    * **Upload includes vpp_plugins.conf** → copy it to the runtime root
+      so the C-side plugin loader picks it up at the next PLC start.
+      Also copy each plugin's JSON config (and its license sibling) from
+      ``conf/`` into ``config.VPP_DATA_DIR`` (under PERSISTENT_DATA_DIR),
+      and REWRITE each ``config_path`` in vpp_plugins.conf to that
+      persistent absolute path. build/ is wiped by install.sh on a runtime
+      version update, which would otherwise delete a purchased license; the
+      persistent dir survives. Only the ``.so`` binary stays under build/vpp
+      (it is code, rebuilt each upload) — the C loader passes config_path to
+      the plugin verbatim, so the .so still finds its config and license.
+
+    * **Upload does not include vpp_plugins.conf** → delete any existing
+      ``vpp_plugins.conf`` from the runtime root.  This ensures a
+      vanilla upload never inadvertently loads a VPP driver left over
+      from a previous project, regardless of what .so files exist in
+      ``build/vpp/``. The persistent config/license are left in place, so a
+      device keeps its license if the VPP is re-added later.
+    """
+    VPP_CONF_DEST = "vpp_plugins.conf"
+    VPP_BUILD_DIR = "build/vpp"
+    uploaded_conf = os.path.join(generated_dir, "vpp_plugins.conf")
+
+    if os.path.exists(uploaded_conf):
+        runtime_root = os.path.abspath(".")
+
+        # Containment BEFORE the copy: once this file is in the runtime root the
+        # C loader will dlopen whatever `path` says, so an escaping entry has to
+        # be stopped while it is still just a file in core/generated/.
+        contained, reason = validate_vpp_plugins_conf(uploaded_conf, runtime_root, VPP_BUILD_DIR)
+        if not contained:
+            build_state.log(f"[ERROR] VPP: refusing vpp_plugins.conf from upload: {reason}\n")
+            if os.path.exists(VPP_CONF_DEST):
+                os.remove(VPP_CONF_DEST)
+                build_state.log("[INFO] VPP: removed previous vpp_plugins.conf\n")
+            return
+
+        # Copy vpp_plugins.conf to runtime root
+        shutil.copy2(uploaded_conf, VPP_CONF_DEST)
+        build_state.log("[INFO] VPP: installed vpp_plugins.conf from upload\n")
+
+        # Copy each VPP config into the persistent dir and rewrite config_path.
+        # config_path is the single source of truth for the .so, so this is
+        # what carries config+license out of the wipe-on-update build/ tree.
+        conf_dir = os.path.join(generated_dir, "conf")
+        try:
+            conf_entries = os.listdir(conf_dir)
+        except OSError:
+            conf_entries = []
+        vpp_conf_plugins = PluginsConfiguration.from_file(VPP_CONF_DEST)
+        rewrote_paths = False
+        for p in vpp_conf_plugins.plugins:
+            if not p.config_path:
+                continue
+            src_config = os.path.join(conf_dir, f"{p.name}.json")
+            if not os.path.exists(src_config):
+                build_state.log(
+                    f"[WARNING] VPP: conf/{p.name}.json not found in upload, skipping\n"
+                )
+                continue
+
+            # Destination is built from the plugin NAME (basename), never from
+            # editor-supplied config_path, so a forged conf cannot steer the
+            # write outside the persistent dir. A non-basename name is refused.
+            if not p.name or os.path.basename(p.name) != p.name:
+                build_state.log(f"[WARNING] VPP: suspicious plugin name '{p.name}', skipping\n")
+                continue
+            dest_config = os.path.join(str(VPP_DATA_DIR), f"{p.name}.json")
+            if not is_inside_root(dest_config, str(VPP_DATA_DIR)):
+                build_state.log(
+                    f"[WARNING] VPP: config dest '{dest_config}' escapes the persistent dir, skipping\n"
+                )
+                continue
+            # Migration source derived from the FIXED build/vpp location plus
+            # the basename-checked plugin name, never from config_path. Using
+            # config_path would let a forged conf steer the read anywhere.
+            old_license = os.path.join(runtime_root, VPP_BUILD_DIR, f"{p.name}.license")
+
+            os.makedirs(os.path.dirname(dest_config), exist_ok=True)
+            shutil.copy2(src_config, dest_config)
+            build_state.log(f"[INFO] VPP: copied {p.name}.json to {dest_config}\n")
+
+            # Point the .so at the persistent config (absolute). This one line is
+            # what moves the license out of harm's way: the license sibling the
+            # .so derives from config_path now lives in the persistent dir too.
+            p.config_path = dest_config
+            rewrote_paths = True
+            dest_license = derive_license_path(dest_config)
+
+            # Deliver the optional license blob to the sibling of the persistent
+            # config (same path 0x49 writes and the .so reads).
+            src_license = os.path.join(conf_dir, f"{p.name}.license")
+            if os.path.exists(src_license):
+                shutil.copy2(src_license, dest_license)
+                build_state.log(f"[INFO] VPP: copied {p.name}.license to {dest_license}\n")
+            elif old_license and os.path.exists(old_license) and not os.path.exists(dest_license):
+                # One-time migration: move a pre-change license from
+                # build/vpp to the persistent sibling. Best-effort: a failure
+                # here reactivates from the backend on next connect.
+                try:
+                    shutil.copy2(old_license, dest_license)
+                    build_state.log(
+                        f"[INFO] VPP: migrated {p.name}.license {old_license} -> {dest_license}\n"
+                    )
+                except OSError as exc:
+                    build_state.log(f"[WARNING] VPP: could not migrate {p.name}.license: {exc}\n")
+
+            # Copy other conf/<name>.* siblings; .json and .license are handled above.
+            sibling_prefix = f"{p.name}."
+            handled_siblings = {f"{p.name}.json", f"{p.name}.license"}
+            for sibling_name in conf_entries:
+                if not sibling_name.startswith(sibling_prefix):
+                    continue
+                if sibling_name in handled_siblings:
+                    continue
+                src_sibling = os.path.join(conf_dir, sibling_name)
+                if not os.path.isfile(src_sibling):
+                    continue
+                dest_sibling = os.path.join(str(VPP_DATA_DIR), sibling_name)
+                if not is_inside_root(dest_sibling, str(VPP_DATA_DIR)):
+                    build_state.log(
+                        f"[WARNING] VPP: sibling dest '{dest_sibling}' escapes the persistent dir, skipping\n"
+                    )
+                    continue
+                try:
+                    shutil.copy2(src_sibling, dest_sibling)
+                    build_state.log(f"[INFO] VPP: copied {sibling_name} to {dest_sibling}\n")
+                except OSError as exc:
+                    build_state.log(f"[WARNING] VPP: could not copy {sibling_name}: {exc}\n")
+
+        # Persist the rewritten config_path values so the C loader AND the
+        # 0x49/0x4A handlers (via _license_path) read the persistent location,
+        # not the build/vpp one the editor emitted.
+        if rewrote_paths:
+            vpp_conf_plugins.to_file(VPP_CONF_DEST)
+            build_state.log(
+                "[INFO] VPP: rewrote vpp_plugins.conf config_path to the persistent dir\n"
+            )
+    else:
+        # No VPP in this upload — remove any stale vpp_plugins.conf so
+        # the plugin loader does not attempt to load old VPP drivers.
+        if os.path.exists(VPP_CONF_DEST):
+            os.remove(VPP_CONF_DEST)
+            build_state.log("[INFO] VPP: removed stale vpp_plugins.conf (no VPP in upload)\n")
+
+
+def apply_retain_conf(generated_dir: str = "core/generated") -> None:
+    """Apply or remove the persistent-storage settings for this upload.
+
+    Retain settings are owned by the PROJECT, not by the device: the editor
+    emits ``retain.conf`` from the project's Persistent Storage screen and the
+    upload carries it here, exactly as it carries ``vpp_plugins.conf``. This
+    function is the single authoritative gate, with the same two cases:
+
+    * **Upload includes retain.conf** → validate it and copy it to the runtime
+      root, where the PLC application reads it at the next program load.
+
+    * **Upload does not include retain.conf** → delete any existing copy from
+      the runtime root, so the built-in file store goes back to being switched
+      off. This is not tidiness: it is how a target whose VPP owns retention
+      turns the built-in store off. Such a VPP declares
+      ``hidesNativeScreens: ['persistent-storage']``, the editor emits no
+      retain.conf, and the built-in store then declines the role — leaving the
+      vendor's driver as the only store on the device.
+
+    Validation happens HERE rather than at first use. A path whose directory
+    does not exist, or a flush period outside the bounds the core accepts, would
+    otherwise fail on every flush for the life of the program with nothing but a
+    log line to show for it. Refusing it once, with a line in the build log the
+    user is already watching, is the difference between a mistake they can see
+    and one they cannot.
+
+    Note what this function does NOT do: it does not touch retained VALUES. The
+    store itself decides at program start whether what it holds belongs to the
+    program now running, by comparing the program MD5 it stored alongside the
+    bytes. Keeping that decision in the store is what makes baremetal and
+    runtime v4 behave identically — baremetal has no webserver to notice an
+    upload at all.
+    """
+    RETAIN_CONF_NAME = "retain.conf"
+    uploaded_conf = os.path.join(generated_dir, RETAIN_CONF_NAME)
+    dest = str(RETAIN_CONF_PATH)
+
+    if not os.path.exists(uploaded_conf):
+        if os.path.exists(dest):
+            os.remove(dest)
+            build_state.log(
+                "[INFO] Retain: removed stale retain.conf (persistent storage not "
+                "configured in this project)\n"
+            )
+        return
+
+    # Parse with the same reader the core's settings go through, so what is
+    # validated here is exactly what the core will read back.
+    cfg = read_retain_conf_file(uploaded_conf)
+
+    try:
+        if cfg["enabled"]:
+            # Only validate when the store is on. A disabled stanza with a
+            # bad path or out-of-bounds flush period is harmless and refusing
+            # it would delete the device's existing config over an unread field.
+            validate_retain_path(cfg["path"])
+            validate_flush_seconds(cfg["flushSeconds"])
+    except RetainConfigError as e:
+        build_state.log(f"[ERROR] Retain: refusing retain.conf from upload: {e}\n")
+        # Leave no half-applied state: a refused stanza must not leave the
+        # PREVIOUS project's settings in force, because the user would then be
+        # looking at a device configured by a project they are no longer
+        # running.
+        if os.path.exists(dest):
+            os.remove(dest)
+            build_state.log("[INFO] Retain: removed previous retain.conf\n")
+        return
+
+    # Write the PARSED stanza, not a byte copy of the upload: an empty
+    # `path=` from the editor means "use this device's default", which
+    # read_retain_conf_file substitutes. A byte copy would ship the empty
+    # value and the core would treat it as a misconfiguration.
+    write_retain_conf_file(
+        dest, enabled=cfg["enabled"], path_value=cfg["path"], flush_seconds=cfg["flushSeconds"]
+    )
+    state = "on" if cfg["enabled"] else "off"
+    build_state.log(
+        f"[INFO] Retain: installed retain.conf from upload (persistent storage {state})\n"
+    )
+
+
+def apply_image_conf(generated_dir: str = "core/generated") -> None:
+    """Apply or remove the I/O image sizes for this upload.
+
+    The sizes are owned by the PROJECT and derived rather than chosen: the
+    editor works them out from what the project contains and the upload carries
+    them here as ``image.conf``, exactly as it carries ``retain.conf``. This
+    function installs what arrives and refuses what the core could not honour.
+
+    * **Upload includes image.conf** -> validate it and write the normalised
+      stanza to the runtime root, where the PLC application reads it at the next
+      program load.
+
+    * **Upload does not include image.conf** -> delete any existing copy.
+
+    THAT ABSENT CASE IS NOT THE SAME AS RETAIN'S, though the action matches.
+    A missing ``retain.conf`` is an instruction -- switch the built-in store
+    off. A missing ``image.conf`` says nothing at all: the runtime can always
+    derive the sizes from the located variables of the program it just loaded.
+    The reason to delete anyway is that a STALE file is worse than none. Leave
+    the previous project's ``int_output=4096`` in place, upload a program that
+    needs eight, and ``max(configured, derived)`` keeps 4096 words reserved for
+    a program that is no longer on the device -- silently, and for as long as
+    nobody notices. Deleting hands the decision back to the program.
+
+    Validation happens HERE rather than at bind time, for the same reason it
+    does for retain: a table the core cannot address would otherwise be
+    discovered once per located variable, deep in a program load, with nothing
+    but a log line on a device nobody is watching. Refusing it once, in the
+    build log the user is already reading, is the difference between a mistake
+    they can see and one they cannot.
+
+    Note what this function does NOT do: it does not size anything itself, and
+    it does not consult the program. The floor derived from the ``.so`` is the
+    core's business at load time, which is what keeps a device that was
+    provisioned by some other route reaching the same answer.
+    """
+    IMAGE_CONF_NAME = "image.conf"
+    uploaded_conf = os.path.join(generated_dir, IMAGE_CONF_NAME)
+    dest = str(IMAGE_CONF_PATH)
+
+    if not os.path.exists(uploaded_conf):
+        if os.path.exists(dest):
+            os.remove(dest)
+            build_state.log(
+                "[INFO] Image: removed stale image.conf (this upload carries no "
+                "sizes; the runtime will size the image from the program)\n"
+            )
+        return
+
+    # Parse with the same reader the core's sizes go through, so what is
+    # validated here is exactly what the core will read back.
+    version, sizes, units = read_image_conf_file(uploaded_conf)
+
+    try:
+        sizes = validate_image_conf(version, sizes, units)
+    except ImageConfigError as e:
+        build_state.log(f"[ERROR] Image: refusing image.conf from upload: {e}\n")
+        # Leave no half-applied state, and in particular do not leave the
+        # PREVIOUS project's sizes in force: the user would be looking at a
+        # device sized by a project they are no longer running.
+        if os.path.exists(dest):
+            os.remove(dest)
+            build_state.log("[INFO] Image: removed previous image.conf\n")
+        return
+
+    write_image_conf_file(dest, sizes)
+    build_state.log(
+        f"[INFO] Image: installed image.conf from upload ({describe_image_conf(sizes)})\n"
+    )
+
+
+def run_compile(runtime_manager: RuntimeManager, cwd: str = "core/generated", clean: bool = False):
+    """Run compile script synchronously (wait for completion) and update status/logs.
+
+    When ``clean=True`` (editor's "Clean build and upload" option), wipe the
+    Make-managed ``core/build/`` directory and clear the ccache contents
+    before invoking compile.sh. This forces a full recompile from scratch
+    even when source content hashes match the cached objects — useful when
+    the user suspects a stale or corrupted cache.
+    """
+    script_path: str = "./scripts/compile.sh"
+
+    def stream_output(pipe, prefix):
+        # If this drainer dies, the child's pipe fills and compile_proc.wait()
+        # blocks forever, pinning status at COMPILING. Catch to surface the
+        # error; the finally closes the pipe so the child sees EOF.
+        try:
+            for line in iter(pipe.readline, ""):
+                msg = f"{prefix}{line}"
+                build_state.log(msg)
+        except Exception as e:
+            build_state.log(f"[WARNING] Log drainer crashed: {e}\n")
+        finally:
+            pipe.close()
+
+    def wait_step(proc: subprocess.Popen, step_name: str) -> bool:
+        """Wait for a subprocess and log the result. Returns True on
+        zero-exit. Caller is responsible for combining results — does
+        NOT mutate build_state.status, since that's only updated once
+        after every step (compile + cleanup) completes, so a successful
+        compile isn't masked by a failed cleanup or vice-versa."""
+        exit_code = proc.wait()
+        if exit_code == 0:
+            build_state.log(f"[INFO] {step_name} finished successfully\n")
+            return True
+        build_state.log(f"[ERROR] {step_name} failed (exit={exit_code})\n")
+        return False
+
+    # Fail-closed guard: without this, a raise inside run_compile dies in the
+    # daemon thread and status stays pinned at COMPILING, which the editor
+    # only recovers from via its minutes-long TCP timeout.
+    try:
+        build_state.status = BuildStatus.COMPILING
+        build_state.log("[INFO] Starting compilation\n")
+
+        # --- Optional clean step ---
+        if clean:
+            build_state.log("[INFO] Clean build requested — wiping core/build/ and ccache\n")
+            # Wipe the per-project object cache. shutil.rmtree avoids needing
+            # `make clean` (which would require the Makefile to be in cwd).
+            build_dir = "core/build"
+            if os.path.exists(build_dir):
+                try:
+                    shutil.rmtree(build_dir)
+                except OSError as e:
+                    build_state.log(f"[WARNING] Failed to remove {build_dir}: {e}\n")
+            # Wipe ccache. Failures here are non-fatal — `ccache -C` returning
+            # non-zero (e.g. ccache not installed) shouldn't abort the build,
+            # since the build folder wipe alone already invalidates per-file
+            # caches that live in build/.
+            try:
+                ccache_proc = subprocess.run(
+                    ["ccache", "-C"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                if ccache_proc.returncode == 0:
+                    build_state.log("[INFO] ccache cleared\n")
+                else:
+                    build_state.log(
+                        f"[WARNING] ccache -C exited {ccache_proc.returncode}: "
+                        f"{ccache_proc.stderr.strip() or 'no error output'}\n"
+                    )
+            except FileNotFoundError:
+                build_state.log("[INFO] ccache not installed — skipping cache wipe\n")
+
+        # --- Compile step ---
+        # errors='replace' so a non-UTF8 byte in g++ stderr (rare with
+        # the C locale but possible with i18n locales or files that
+        # carry non-UTF8 identifiers) is replaced with U+FFFD instead of
+        # raising UnicodeDecodeError inside the drainer thread.
+        compile_proc = subprocess.Popen(
+            ["bash", script_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            bufsize=1,
+        )
+
+        threading.Thread(target=stream_output, args=(compile_proc.stdout, ""), daemon=True).start()
+        threading.Thread(
+            target=stream_output, args=(compile_proc.stderr, "[ERROR] "), daemon=True
+        ).start()
+
+        # Block until compile finishes.
+        compile_ok = wait_step(compile_proc, "Build")
+
+        # stop_plc() returns on ACK, but the .so teardown continues async.
+        # Wait for the runtime to leave TRANSITIONING before cleanup touches
+        # build/new_libplc.so, otherwise the swap races teardown.
+        runtime_manager.stop_plc()
+        if not _wait_for_plc_idle(runtime_manager, timeout_s=30.0):
+            build_state.log(
+                "[WARNING] Runtime stayed in TRANSITIONING for 30s; "
+                "proceeding with cleanup anyway\n"
+            )
+
+        # --- Cleanup step ---
+        cleanup_proc = subprocess.Popen(
+            ["bash", "./scripts/compile-clean.sh"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            bufsize=1,
+        )
+
+        threading.Thread(target=stream_output, args=(cleanup_proc.stdout, ""), daemon=True).start()
+        threading.Thread(
+            target=stream_output, args=(cleanup_proc.stderr, "[ERROR] "), daemon=True
+        ).start()
+
+        cleanup_ok = wait_step(cleanup_proc, "Cleanup")
+
+        if compile_ok and cleanup_ok:
+            build_state.status = BuildStatus.SUCCESS
+            build_state.exit_code = 0
+        else:
+            build_state.status = BuildStatus.FAILED
+            build_state.exit_code = 1
+
+        if build_state.status == BuildStatus.SUCCESS:
+            # Re-register plugins now that compile.sh produced any VPP .so
+            # files. Hold status at COMPILING until plugins.conf is written so
+            # the editor cannot send START before the VPP entry lands.
+            build_state.status = BuildStatus.COMPILING
+            try:
+                update_plugin_configurations(cwd)
+                build_state.status = BuildStatus.SUCCESS
+                # Do NOT auto-start the PLC: the editor owns START so it can
+                # retry around the COMMAND:BUSY window from the previous STOP.
+                runtime_manager.reset_crash_tracking()
+            except Exception as e:
+                build_state.log(f"[ERROR] Failed to update plugin configurations: {e}\n")
+                build_state.status = BuildStatus.FAILED
+                build_state.exit_code = 1
+        else:
+            build_state.log("[WARNING] PLC program has not been updated because the build failed\n")
+    except Exception as e:
+        # Outer fail-closed guard. exit_code = -1 distinguishes an
+        # orchestrator crash from a build-step non-zero exit (which uses
+        # exit_code = 1).
+        build_state.log(f"[ERROR] Compile orchestrator crashed: {e}\n")
+        build_state.status = BuildStatus.FAILED
+        build_state.exit_code = -1
+    finally:
+        # Promote the staged snapshot on success, discard on anything else.
+        # In a `finally` so a crash cannot leave a stale staged snapshot for
+        # the next build to promote.
+        try:
+            if build_state.status == BuildStatus.SUCCESS:
+                project_snapshot.promote()
+            else:
+                project_snapshot.discard_staged()
+        except Exception as e:  # never let snapshot bookkeeping mask a build result
+            build_state.log(f"[WARNING] Project snapshot bookkeeping failed: {e}\n")

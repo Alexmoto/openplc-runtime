@@ -1,0 +1,24 @@
+# OPC-UA Plugin Dependencies for OpenPLC Runtime
+# Main OPC-UA library for async server implementation
+asyncua==1.1.8
+
+# System monitoring for network interface detection (optional on MSYS2/Cygwin)
+# The code has socket-based fallbacks when psutil is unavailable (see opcua_endpoints_config.py)
+psutil==7.2.1; sys_platform != 'cygwin'
+
+# Password hashing for user authentication
+# On MSYS2/Cygwin, bcrypt cannot be built (Rust/pyo3 linking issues).
+# The code falls back to PBKDF2-HMAC-SHA256 (Python stdlib) when bcrypt is unavailable.
+bcrypt>=4.0.0; sys_platform != 'cygwin'
+
+# Core dependencies (automatically installed with asyncua)
+# cryptography>=3.4.8        # For OPC-UA security features
+# python-dateutil>=2.8.0     # For datetime handling in OPC-UA
+# aiofiles>=0.8.0            # For async file operations
+# pytz>=2021.1               # Timezone support
+
+# Development and testing dependencies (optional)
+# Uncomment if running tests
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-mock>=3.10.0

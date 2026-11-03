@@ -1,0 +1,483 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Autonomy®
+
+/**
+ * @file test_sdo_config.c
+ * @brief Unit tests for SDO value parsing in ecat_config_parse()
+ *
+ * Verifies that the parser correctly handles SDO values as both
+ * JSON numbers and JSON strings (decimal, hex, float, negative).
+ * Exercises the get_numeric_value() helper via ecat_config_parse().
+ */
+
+#include "config.h"
+#include "unity.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+
+void setUp(void) {}
+void tearDown(void) {}
+
+/**
+ * Helper: write a minimal JSON config with a single slave that has one SDO
+ * entry whose "value" field is set to the provided raw JSON token.
+ * Returns the path to the temp file.
+ */
+static const char *TEMP_FILE = "test_sdo_config_tmp.json";
+
+static int write_sdo_json(const char *value_token, const char *data_type)
+{
+    FILE *fp = fopen(TEMP_FILE, "w");
+    if (!fp)
+        return -1;
+
+    fprintf(fp,
+        "[{\n"
+        "  \"name\": \"test\",\n"
+        "  \"protocol\": \"ETHERCAT\",\n"
+        "  \"config\": {\n"
+        "    \"master\": { \"interface\": \"eth0\", \"cycle_time_us\": 1000, "
+        "\"receive_timeout_us\": 2000 },\n"
+        "    \"slaves\": [{\n"
+        "      \"position\": 1,\n"
+        "      \"name\": \"TestSlave\",\n"
+        "      \"type\": \"coupler\",\n"
+        "      \"vendor_id\": \"0x00000002\",\n"
+        "      \"product_code\": \"0x00000001\",\n"
+        "      \"revision\": \"0x00000001\",\n"
+        "      \"channels\": [],\n"
+        "      \"sdo_configurations\": [{\n"
+        "        \"index\": \"0x8000\",\n"
+        "        \"subindex\": 1,\n"
+        "        \"value\": %s,\n"
+        "        \"data_type\": \"%s\",\n"
+        "        \"name\": \"TestSDO\"\n"
+        "      }],\n"
+        "      \"rx_pdos\": [],\n"
+        "      \"tx_pdos\": []\n"
+        "    }],\n"
+        "    \"diagnostics\": {}\n"
+        "  }\n"
+        "}]\n",
+        value_token, data_type);
+
+    fclose(fp);
+    return 0;
+}
+
+static void cleanup_temp(void)
+{
+    remove(TEMP_FILE);
+}
+
+/* ---- JSON number values ---- */
+
+void test_sdo_parse_NumberValue_ShouldStoreCorrectly(void)
+{
+    write_sdo_json("100", "UINT16");
+
+    /* ecat_config_t is too large for the stack; use static */
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_EQUAL_INT(1, config.slave_count);
+    TEST_ASSERT_EQUAL_INT(1, config.slaves[0].sdo_count);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 100.0, config.slaves[0].sdo_configs[0].value);
+    TEST_ASSERT_EQUAL_INT(ECAT_DTYPE_UINT16, config.slaves[0].sdo_configs[0].parsed_type);
+
+    cleanup_temp();
+}
+
+void test_sdo_parse_NegativeNumber_ShouldStoreCorrectly(void)
+{
+    write_sdo_json("-50", "INT16");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, -50.0, config.slaves[0].sdo_configs[0].value);
+    TEST_ASSERT_EQUAL_INT(ECAT_DTYPE_INT16, config.slaves[0].sdo_configs[0].parsed_type);
+
+    cleanup_temp();
+}
+
+void test_sdo_parse_FloatNumber_ShouldStoreCorrectly(void)
+{
+    write_sdo_json("3.14", "REAL");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 3.14, config.slaves[0].sdo_configs[0].value);
+    TEST_ASSERT_EQUAL_INT(ECAT_DTYPE_REAL32, config.slaves[0].sdo_configs[0].parsed_type);
+
+    cleanup_temp();
+}
+
+/* ---- JSON string values (accepted for compatibility) ---- */
+
+void test_sdo_parse_StringDecimal_ShouldParseAsNumber(void)
+{
+    write_sdo_json("\"100\"", "UINT16");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 100.0, config.slaves[0].sdo_configs[0].value);
+
+    cleanup_temp();
+}
+
+void test_sdo_parse_StringHex_ShouldParseAsNumber(void)
+{
+    write_sdo_json("\"0xFF\"", "UINT8");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 255.0, config.slaves[0].sdo_configs[0].value);
+    TEST_ASSERT_EQUAL_INT(ECAT_DTYPE_UINT8, config.slaves[0].sdo_configs[0].parsed_type);
+
+    cleanup_temp();
+}
+
+void test_sdo_parse_StringFloat_ShouldParseAsNumber(void)
+{
+    write_sdo_json("\"3.14\"", "REAL32");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 3.14, config.slaves[0].sdo_configs[0].value);
+    TEST_ASSERT_EQUAL_INT(ECAT_DTYPE_REAL32, config.slaves[0].sdo_configs[0].parsed_type);
+
+    cleanup_temp();
+}
+
+void test_sdo_parse_StringNegative_ShouldParseAsNumber(void)
+{
+    write_sdo_json("\"-50\"", "INT16");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, -50.0, config.slaves[0].sdo_configs[0].value);
+
+    cleanup_temp();
+}
+
+void test_sdo_parse_StringEmpty_ShouldDefaultToZero(void)
+{
+    write_sdo_json("\"\"", "UINT16");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 0.0, config.slaves[0].sdo_configs[0].value);
+
+    cleanup_temp();
+}
+
+/* ---- Missing value field ---- */
+
+void test_sdo_parse_MissingValue_ShouldDefaultToZero(void)
+{
+    /* Write JSON without a "value" field */
+    FILE *fp = fopen(TEMP_FILE, "w");
+    TEST_ASSERT_NOT_NULL(fp);
+
+    fprintf(fp,
+        "[{\n"
+        "  \"name\": \"test\",\n"
+        "  \"protocol\": \"ETHERCAT\",\n"
+        "  \"config\": {\n"
+        "    \"master\": { \"interface\": \"eth0\", \"cycle_time_us\": 1000, "
+        "\"receive_timeout_us\": 2000 },\n"
+        "    \"slaves\": [{\n"
+        "      \"position\": 1,\n"
+        "      \"name\": \"TestSlave\",\n"
+        "      \"type\": \"coupler\",\n"
+        "      \"vendor_id\": \"0x00000002\",\n"
+        "      \"product_code\": \"0x00000001\",\n"
+        "      \"revision\": \"0x00000001\",\n"
+        "      \"channels\": [],\n"
+        "      \"sdo_configurations\": [{\n"
+        "        \"index\": \"0x8000\",\n"
+        "        \"subindex\": 1,\n"
+        "        \"data_type\": \"UINT16\",\n"
+        "        \"name\": \"TestSDO\"\n"
+        "      }],\n"
+        "      \"rx_pdos\": [],\n"
+        "      \"tx_pdos\": []\n"
+        "    }],\n"
+        "    \"diagnostics\": {}\n"
+        "  }\n"
+        "}]\n");
+    fclose(fp);
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 0.0, config.slaves[0].sdo_configs[0].value);
+
+    cleanup_temp();
+}
+
+/* ---- Data type resolution in SDO ---- */
+
+void test_sdo_parse_DataType_ShouldResolveParsedType(void)
+{
+    write_sdo_json("42", "DINT");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_EQUAL_INT(ECAT_DTYPE_INT32, config.slaves[0].sdo_configs[0].parsed_type);
+
+    cleanup_temp();
+}
+
+void test_sdo_parse_LrealDataType_ShouldResolveReal64(void)
+{
+    write_sdo_json("1.5", "LREAL");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_EQUAL_INT(ECAT_DTYPE_REAL64, config.slaves[0].sdo_configs[0].parsed_type);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 1.5, config.slaves[0].sdo_configs[0].value);
+
+    cleanup_temp();
+}
+
+/* ---- Large hex value ---- */
+
+void test_sdo_parse_StringLargeHex_ShouldParseCorrectly(void)
+{
+    write_sdo_json("\"0x1A2B\"", "UINT16");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 6699.0, config.slaves[0].sdo_configs[0].value);
+
+    cleanup_temp();
+}
+
+/* ---- Byte-string payload + complete_access ---- */
+
+/* Minimal config with a slave and one SDO carrying the given extra JSON fields. */
+static int write_sdo_json_fields(const char *extra_fields)
+{
+    FILE *fp = fopen(TEMP_FILE, "w");
+    if (!fp)
+        return -1;
+    fprintf(fp,
+        "[{\"name\":\"m\",\"protocol\":\"ETHERCAT\",\"config\":{"
+        "\"master\":{\"interface\":\"eth0\",\"cycle_time_us\":1000,\"receive_timeout_us\":2000},"
+        "\"slaves\":[{\"position\":1,\"name\":\"S\",\"type\":\"coupler\","
+        "\"vendor_id\":\"0x2\",\"product_code\":\"0x1\",\"revision\":\"0x1\","
+        "\"sdo_configurations\":[{\"index\":\"0x8000\",\"subindex\":3,"
+        "\"data_type\":\"UINT8\",%s}],"
+        "\"rx_pdos\":[],\"tx_pdos\":[]}]}}]",
+        extra_fields);
+    fclose(fp);
+    return 0;
+}
+
+static int write_sdo_json_with_datatype(const char *data_type, const char *extra_fields);
+
+void test_sdo_parse_ByteStringAscii_ShouldStoreBytes(void)
+{
+    write_sdo_json_with_datatype("VISIBLE_STRING", "\"value_bytes\":\"UR20-4DI-P\"");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+
+    const ecat_sdo_config_t *sdo = &config.slaves[0].sdo_configs[0];
+    TEST_ASSERT_NOT_NULL(sdo->value_bytes);
+    TEST_ASSERT_EQUAL_INT(10, (int)sdo->value_bytes_len);
+    TEST_ASSERT_EQUAL_MEMORY("UR20-4DI-P", sdo->value_bytes, 10);
+    TEST_ASSERT_FALSE(sdo->complete_access);
+
+    ecat_config_destroy(&config);
+    cleanup_temp();
+}
+
+void test_sdo_parse_ByteStringHex_ShouldDecodeHexPairs(void)
+{
+    write_sdo_json_with_datatype("OCTET_STRING", "\"value_bytes\":\"0xDEADBEEF\"");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+
+    const ecat_sdo_config_t *sdo = &config.slaves[0].sdo_configs[0];
+    TEST_ASSERT_NOT_NULL(sdo->value_bytes);
+    TEST_ASSERT_EQUAL_INT(4, (int)sdo->value_bytes_len);
+    TEST_ASSERT_EQUAL_HEX8(0xDE, sdo->value_bytes[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xAD, sdo->value_bytes[1]);
+    TEST_ASSERT_EQUAL_HEX8(0xBE, sdo->value_bytes[2]);
+    TEST_ASSERT_EQUAL_HEX8(0xEF, sdo->value_bytes[3]);
+
+    ecat_config_destroy(&config);
+    cleanup_temp();
+}
+
+void test_sdo_parse_ByteStringHexOddNibbles_ShouldReject(void)
+{
+    write_sdo_json_with_datatype("OCTET_STRING", "\"value_bytes\":\"0xABC\"");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+    TEST_ASSERT_NOT_EQUAL(ECAT_CONFIG_OK, rc);
+
+    cleanup_temp();
+}
+
+void test_sdo_parse_CompleteAccessTrue_ShouldSetFlag(void)
+{
+    write_sdo_json_fields("\"value\":42,\"complete_access\":true");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+
+    TEST_ASSERT_TRUE(config.slaves[0].sdo_configs[0].complete_access);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 42.0, config.slaves[0].sdo_configs[0].value);
+    TEST_ASSERT_NULL(config.slaves[0].sdo_configs[0].value_bytes);
+
+    ecat_config_destroy(&config);
+    cleanup_temp();
+}
+
+void test_sdo_parse_CompleteAccessDefault_ShouldBeFalse(void)
+{
+    write_sdo_json_fields("\"value\":1");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+
+    TEST_ASSERT_FALSE(config.slaves[0].sdo_configs[0].complete_access);
+
+    ecat_config_destroy(&config);
+    cleanup_temp();
+}
+
+/* ---- Byte-string data_type acceptance (C8) ---- */
+
+/* Minimal config letting the test name the data_type explicitly. */
+static int write_sdo_json_with_datatype(const char *data_type, const char *extra_fields)
+{
+    FILE *fp = fopen(TEMP_FILE, "w");
+    if (!fp)
+        return -1;
+    fprintf(fp,
+        "[{\"name\":\"m\",\"protocol\":\"ETHERCAT\",\"config\":{"
+        "\"master\":{\"interface\":\"eth0\",\"cycle_time_us\":1000,\"receive_timeout_us\":2000},"
+        "\"slaves\":[{\"position\":1,\"name\":\"S\",\"type\":\"coupler\","
+        "\"vendor_id\":\"0x2\",\"product_code\":\"0x1\",\"revision\":\"0x1\","
+        "\"sdo_configurations\":[{\"index\":\"0x8010\",\"subindex\":3,"
+        "\"data_type\":\"%s\",%s}],"
+        "\"rx_pdos\":[],\"tx_pdos\":[]}]}}]",
+        data_type, extra_fields);
+    fclose(fp);
+    return 0;
+}
+
+void test_sdo_parse_VisibleStringWithBytes_ShouldParse(void)
+{
+    write_sdo_json_with_datatype("VISIBLE_STRING", "\"value_bytes\":\"UR20-4DI-P\"");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+
+    const ecat_sdo_config_t *sdo = &config.slaves[0].sdo_configs[0];
+    TEST_ASSERT_EQUAL_INT(ECAT_DTYPE_BYTESTRING, sdo->parsed_type);
+    TEST_ASSERT_NOT_NULL(sdo->value_bytes);
+    TEST_ASSERT_EQUAL_INT(10, (int)sdo->value_bytes_len);
+
+    ecat_config_destroy(&config);
+    cleanup_temp();
+}
+
+void test_sdo_parse_OctetStringWithBytes_ShouldParse(void)
+{
+    write_sdo_json_with_datatype("OCTET_STRING", "\"value_bytes\":\"0xDEADBEEF\"");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+
+    const ecat_sdo_config_t *sdo = &config.slaves[0].sdo_configs[0];
+    TEST_ASSERT_EQUAL_INT(ECAT_DTYPE_BYTESTRING, sdo->parsed_type);
+    TEST_ASSERT_EQUAL_INT(4, (int)sdo->value_bytes_len);
+    TEST_ASSERT_EQUAL_HEX8(0xDE, sdo->value_bytes[0]);
+
+    ecat_config_destroy(&config);
+    cleanup_temp();
+}
+
+void test_sdo_parse_StringAliasWithBytes_ShouldParse(void)
+{
+    write_sdo_json_with_datatype("STRING", "\"value_bytes\":\"ok\"");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+    TEST_ASSERT_EQUAL_INT(ECAT_CONFIG_OK, rc);
+    TEST_ASSERT_EQUAL_INT(ECAT_DTYPE_BYTESTRING, config.slaves[0].sdo_configs[0].parsed_type);
+
+    ecat_config_destroy(&config);
+    cleanup_temp();
+}
+
+void test_sdo_parse_VisibleStringWithoutBytes_ShouldReject(void)
+{
+    write_sdo_json_with_datatype("VISIBLE_STRING", "\"value\":42");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+    TEST_ASSERT_NOT_EQUAL(ECAT_CONFIG_OK, rc);
+
+    cleanup_temp();
+}
+
+void test_sdo_parse_UnknownTypeWithBytes_ShouldReject(void)
+{
+    write_sdo_json_with_datatype("VENDOR_WIDGET", "\"value_bytes\":\"ok\"");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+    TEST_ASSERT_NOT_EQUAL(ECAT_CONFIG_OK, rc);
+
+    cleanup_temp();
+}
+
+void test_sdo_parse_NumericTypeWithBytes_ShouldReject(void)
+{
+    write_sdo_json_with_datatype("UINT32", "\"value_bytes\":\"0x01020304\"");
+
+    static ecat_config_t config;
+    int rc = ecat_config_parse(TEMP_FILE, &config);
+    TEST_ASSERT_NOT_EQUAL(ECAT_CONFIG_OK, rc);
+
+    cleanup_temp();
+}

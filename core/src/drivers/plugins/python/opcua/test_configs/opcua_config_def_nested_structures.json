@@ -1,0 +1,174 @@
+[
+    {
+        "name": "opcua_server",
+        "protocol": "OPC-UA",
+        "config": {
+            "endpoint": "opc.tcp://0.0.0.0:4840/freeopcua/server/",
+            "server_name": "OpenPLC OPC-UA Server",
+            "security_policy": "None",
+            "security_mode": "None",
+            "certificate": "",
+            "private_key": "",
+            "cycle_time_ms": 100,
+            "namespace": "OpenPLC",
+            "variables": [
+                {
+                    "node_name": "temperature",
+                    "datatype": "Float",
+                    "index": 0,
+                    "access": "readwrite"
+                },
+                {
+                    "node_name": "status",
+                    "datatype": "Bool",
+                    "index": 1,
+                    "access": "readonly"
+                },
+                {
+                    "node_name": "person",
+                    "type": "STRUCT",
+                    "members": [
+                        {
+                            "name": "name",
+                            "datatype": "String",
+                            "index": 2,
+                            "access": "readwrite"
+                        },
+                        {
+                            "name": "age",
+                            "datatype": "Int32",
+                            "index": 3,
+                            "access": "readwrite"
+                        }
+                    ]
+                },
+                {
+                    "node_name": "sensor_values",
+                    "type": "ARRAY",
+                    "members": [
+                        {
+                            "name": "[0]",
+                            "datatype": "Float",
+                            "index": 4,
+                            "access": "readwrite"
+                        },
+                        {
+                            "name": "[1]",
+                            "datatype": "Float",
+                            "index": 5,
+                            "access": "readwrite"
+                        },
+                        {
+                            "name": "[2]",
+                            "datatype": "Float",
+                            "index": 6,
+                            "access": "readwrite"
+                        }
+                    ]
+                },
+                {
+                    "node_name": "complex_data",
+                    "type": "STRUCT",
+                    "members": [
+                        {
+                            "name": "simple_field",
+                            "datatype": "Float",
+                            "index": 7,
+                            "access": "readwrite"
+                        },
+                        {
+                            "name": "nested_struct",
+                            "type": "STRUCT",
+                            "members": [
+                                {
+                                    "name": "field1",
+                                    "datatype": "Int",
+                                    "index": 8,
+                                    "access": "readwrite"
+                                },
+                                {
+                                    "name": "field2",
+                                    "datatype": "Bool",
+                                    "index": 9,
+                                    "access": "readonly"
+                                },
+                                {
+                                    "name": "deep_nested",
+                                    "type": "STRUCT",
+                                    "members": [
+                                        {
+                                            "name": "value",
+                                            "datatype": "Float",
+                                            "index": 10,
+                                            "access": "readwrite"
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            "name": "array_in_struct",
+                            "type": "ARRAY",
+                            "members": [
+                                {
+                                    "name": "[0]",
+                                    "datatype": "Int32",
+                                    "index": 11,
+                                    "access": "readwrite"
+                                },
+                                {
+                                    "name": "[1]",
+                                    "datatype": "Int32",
+                                    "index": 12,
+                                    "access": "readwrite"
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "node_name": "struct_array",
+                    "type": "ARRAY",
+                    "members": [
+                        {
+                            "name": "[0]",
+                            "type": "STRUCT",
+                            "members": [
+                                {
+                                    "name": "x",
+                                    "datatype": "Float",
+                                    "index": 13,
+                                    "access": "readwrite"
+                                },
+                                {
+                                    "name": "y",
+                                    "datatype": "Float",
+                                    "index": 14,
+                                    "access": "readwrite"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "[1]",
+                            "type": "STRUCT",
+                            "members": [
+                                {
+                                    "name": "x",
+                                    "datatype": "Float",
+                                    "index": 15,
+                                    "access": "readwrite"
+                                },
+                                {
+                                    "name": "y",
+                                    "datatype": "Float",
+                                    "index": 16,
+                                    "access": "readwrite"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+]

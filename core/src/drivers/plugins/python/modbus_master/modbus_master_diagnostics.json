@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "publish_ms": 100,
+  "groups": [
+    {
+      "device": "DO1",
+      "group": 0,
+      "expected": {
+        "fc": 3,
+        "offset": 0,
+        "location": "%IW0",
+        "length": 11
+      },
+      "stale_ms": 3000,
+      "locations": {
+        "ok": "%MX100.0",
+        "response_ok": "%MX100.1",
+        "status": "%MW100",
+        "last_error": "%MW101",
+        "success_count": "%MD100",
+        "error_count": "%MD101",
+        "consecutive_errors": "%MD102",
+        "age_ms": "%MD103",
+        "publish_counter": "%MD104"
+      }
+    }
+  ]
+}

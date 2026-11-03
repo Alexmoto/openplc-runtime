@@ -1,0 +1,39 @@
+[
+  {
+    "name": "DO1",
+    "protocol": "MODBUS",
+    "config": {
+      "diagnostics_version": 1,
+      "type": "SLAVE",
+      "transport": "tcp",
+      "host": "192.168.1.138",
+      "port": 502,
+      "timeout_ms": 1000,
+      "slave_id": 1,
+      "io_points": [
+        {
+          "diagnostics": {
+            "stale_ms": 3000,
+            "locations": {
+              "ok": "%MX100.0",
+              "response_ok": "%MX100.1",
+              "status": "%MW100",
+              "last_error": "%MW101",
+              "success_count": "%MD100",
+              "error_count": "%MD101",
+              "consecutive_errors": "%MD102",
+              "age_ms": "%MD103",
+              "publish_counter": "%MD104"
+            }
+          },
+          "fc": 3,
+          "offset": "0x0000",
+          "iec_location": "%IW0",
+          "len": 11,
+          "cycle_time_ms": 100,
+          "error_handling": "keep-last-value"
+        }
+      ]
+    }
+  }
+]

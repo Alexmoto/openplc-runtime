@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: openplc-runtime
+Version: 0.1.0
+Summary: OpenPLC Runtime
+Requires-Python: >=3.10
+License-File: LICENSE
+Dynamic: license-file

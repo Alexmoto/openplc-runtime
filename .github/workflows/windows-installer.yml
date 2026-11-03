@@ -1,0 +1,223 @@
+name: Build Windows Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number for the installer'
+        required: false
+        default: '4.0'
+
+jobs:
+  build-windows-installer:
+    # Skip pre-release tags (those containing a hyphen, e.g. v4.1.0-rc.1)
+    if: ${{ !contains(github.ref_name, '-') || github.event_name == 'workflow_dispatch' }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: >-
+            base-devel
+            gcc
+            make
+            cmake
+            pkg-config
+            python
+            python-pip
+            python-setuptools
+            git
+            sqlite3
+
+      - name: Cache MSYS2 packages
+        uses: actions/cache@v4
+        with:
+          path: D:\a\_temp\msys64\var\cache\pacman\pkg
+          key: msys2-packages-${{ runner.os }}-${{ hashFiles('.github/workflows/windows-installer.yml') }}
+          restore-keys: |
+            msys2-packages-${{ runner.os }}-
+
+      - name: Install OpenPLC Runtime using install.sh
+        shell: msys2 {0}
+        run: |
+          echo "=========================================="
+          echo "Installing OpenPLC Runtime via install.sh"
+          echo "=========================================="
+
+          # --native explicitly, even though install.sh forces it on MSYS2 anyway.
+          # The Windows installer ships a built runtime inside an MSYS2 tree;
+          # the default path installs Docker and compiles nothing, which would
+          # produce a payload with no runtime in it. Relying on the script's own
+          # platform detection means a change to that detection silently breaks
+          # this build, so the intent is stated here where it is needed.
+          ./install.sh --native
+
+          echo "Installation complete!"
+
+      # The payload is assembled by copying whatever is on disk, with no idea
+      # what produced it. This is the check that a native build actually
+      # happened: venvs/runtime is created only by install.sh's source path,
+      # never by the container one.
+      - name: Verify the native install produced its artifacts
+        shell: msys2 {0}
+        run: |
+          missing=0
+          for path in venvs/runtime webserver/app.py; do
+            if [ ! -e "$path" ]; then
+              echo "::error::$path is missing -- install.sh did not complete a native install"
+              missing=1
+            fi
+          done
+          if [ ! -x venvs/runtime/bin/python3 ] && [ ! -x venvs/runtime/Scripts/python.exe ]; then
+            echo "::error::the runtime virtualenv has no interpreter"
+            missing=1
+          fi
+          [ "$missing" -eq 0 ] || exit 1
+          echo "Native install verified."
+
+      - name: Prepare installer payload
+        shell: pwsh
+        run: |
+          Write-Host "Preparing installer payload..."
+
+          # Create payload directory structure
+          New-Item -ItemType Directory -Force -Path "windows\payload\msys64"
+          New-Item -ItemType Directory -Force -Path "windows\payload\openplc-runtime"
+
+          # Copy MSYS2 installation
+          Write-Host "Copying MSYS2 installation (this may take a while)..."
+          $msys2Path = "D:\a\_temp\msys64"
+          if (Test-Path $msys2Path) {
+            Copy-Item -Path "$msys2Path\*" -Destination "windows\payload\msys64" -Recurse -Force
+          } else {
+            Write-Host "MSYS2 path not found at $msys2Path, trying C:\msys64..."
+            Copy-Item -Path "C:\msys64\*" -Destination "windows\payload\msys64" -Recurse -Force
+          }
+
+          # Copy OpenPLC Runtime (excluding unnecessary files)
+          Write-Host "Copying OpenPLC Runtime..."
+          $excludeDirs = @('.git', '.github', '.mypy_cache', '.ruff_cache', '.vscode', 'tests', '__pycache__')
+
+          Get-ChildItem -Path "." -Exclude $excludeDirs | Where-Object {
+            $_.Name -ne "windows" -and $_.Name -ne ".git"
+          } | ForEach-Object {
+            if ($_.PSIsContainer) {
+              Copy-Item -Path $_.FullName -Destination "windows\payload\openplc-runtime\$($_.Name)" -Recurse -Force
+            } else {
+              Copy-Item -Path $_.FullName -Destination "windows\payload\openplc-runtime\" -Force
+            }
+          }
+
+          # Clean up to reduce size
+          Write-Host "Cleaning up payload to reduce size..."
+
+          # Remove pacman cache
+          $pacmanCache = "windows\payload\msys64\var\cache\pacman\pkg"
+          if (Test-Path $pacmanCache) {
+            Remove-Item -Path "$pacmanCache\*" -Force -Recurse -ErrorAction SilentlyContinue
+          }
+
+          # Remove unnecessary MSYS2 directories
+          $msys2Cleanup = @(
+            "windows\payload\msys64\var\log",
+            "windows\payload\msys64\tmp"
+          )
+          foreach ($dir in $msys2Cleanup) {
+            if (Test-Path $dir) {
+              Remove-Item -Path "$dir\*" -Force -Recurse -ErrorAction SilentlyContinue
+            }
+          }
+
+          # Calculate payload size
+          $payloadSize = (Get-ChildItem -Path "windows\payload" -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host "Payload size: $([math]::Round($payloadSize, 2)) MB"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          Write-Host "Installing Inno Setup..."
+          choco install innosetup -y --no-progress
+
+          # Add Inno Setup to PATH
+          $env:PATH = "C:\Program Files (x86)\Inno Setup 6;$env:PATH"
+          [Environment]::SetEnvironmentVariable("PATH", $env:PATH, "Process")
+
+      - name: Create placeholder icon
+        shell: pwsh
+        run: |
+          # Create a simple placeholder icon if one doesn't exist
+          # In production, you should include a proper icon file
+          if (-not (Test-Path "windows\icon.ico")) {
+            Write-Host "Creating placeholder icon..."
+            # Download a generic icon or create one
+            # For now, we'll modify the setup.iss to not require an icon
+          }
+
+      - name: Build installer with Inno Setup
+        shell: pwsh
+        run: |
+          Write-Host "Building installer..."
+
+          # NOTE: $version here only labels the installer (filename +
+          # Add/Remove Programs AppVersion). The version the RUNTIME
+          # advertises (discovery scan, /api/version) comes from the
+          # repo-root VERSION file baked into the payload, NOT from the
+          # tag. That file must be bumped by hand for every release -- see
+          # webserver/version.py. (A CI-only injection here would not help
+          # manual `git clone && ./install.sh` installs, which are common.)
+          #
+          # Set version from input or tag
+          $version = "${{ github.event.inputs.version }}"
+          if ([string]::IsNullOrEmpty($version)) {
+            $version = "${{ github.ref_name }}".TrimStart('v')
+            if ([string]::IsNullOrEmpty($version) -or $version -eq "${{ github.ref_name }}") {
+              $version = "4.0"
+            }
+          }
+          Write-Host "Building version: $version"
+
+          # Create output directory
+          New-Item -ItemType Directory -Force -Path "windows\output"
+
+          # Run Inno Setup compiler
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion="$version" `
+            /O"windows\output" `
+            /F"OpenPLC_Runtime_$($version)_Setup" `
+            "windows\setup.iss"
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Inno Setup compilation failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+
+          Write-Host "Installer built successfully!"
+          Get-ChildItem "windows\output"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: windows/output/*.exe
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: windows/output/*.exe
+          draft: false
+          prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

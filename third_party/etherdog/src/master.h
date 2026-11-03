@@ -1,0 +1,319 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Autonomy®
+
+/**
+ * @file master.h
+ * @brief EtherCAT Master SOEM Wrapper Interface
+ *
+ * Provides a high-level interface for initializing and managing the
+ * EtherCAT master using the SOEM library. Handles network initialization,
+ * slave scanning, topology validation, state transitions, SDO configuration,
+ * and slave recovery.
+ *
+ * The initialization sequence is split into discrete phases to support
+ * the bus state machine:
+ *   1. open_and_scan   - Open interface, scan bus, validate topology
+ *   2. write_sdos      - Write SDO parameters to slaves (in PRE-OP)
+ *   3. configure       - Map process data, configure Distributed Clocks
+ *   4. transition_to_op - Transition all slaves to OPERATIONAL
+ */
+
+#ifndef ETHERCAT_MASTER_H
+#define ETHERCAT_MASTER_H
+
+#include "config.h"
+#include "log.h"
+#include "soem/soem.h"
+
+/**
+ * @brief Open network interface, scan bus, and validate topology
+ *
+ * Performs initialization steps 1-3:
+ *   1. Open network interface via SOEM
+ *   2. Scan the bus for slaves
+ *   3. Validate topology against JSON configuration
+ *
+ * @param inst   Per-master instance (contains config, SOEM context, IOmap)
+ * @param logger Logger
+ * @return 0 on success, -1 on failure
+ */
+int ecat_master_open_and_scan(ecat_master_instance_t *inst, edog_logger_t *logger);
+
+/**
+ * @brief Write SDO parameters to a slave
+ *
+ * Writes all configured SDO entries to the specified slave using ecx_SDOwrite.
+ * Must be called while slaves are in PRE-OP state (after open_and_scan,
+ * before configure).
+ *
+ * @param inst           Per-master instance
+ * @param slave_pos      1-based slave position on the bus
+ * @param sdos           Array of SDO configuration entries
+ * @param sdo_count      Number of SDO entries
+ * @param sdo_timeout_ms SDO operation timeout in milliseconds (0 = SOEM default)
+ * @param logger         Logger
+ * @return 0 if all SDOs were written, -1 if any SDO write failed
+ *         (sanity-check, missing CoE support, or any wkc<=0).  When the
+ *         caller has slave->strict_sdo set, -1 should abort startup.
+ */
+int ecat_master_write_sdos(ecat_master_instance_t *inst, int slave_pos,
+                           const ecat_sdo_config_t *sdos,
+                           int sdo_count, int sdo_timeout_ms,
+                           edog_logger_t *logger);
+
+/**
+ * @brief Map process data and configure Distributed Clocks
+ *
+ * Performs initialization steps 4-5:
+ *   4. Map process data (IOmap)
+ *   5. Configure Distributed Clocks
+ *
+ * @param inst   Per-master instance
+ * @param logger Logger
+ * @return 0 on success, -1 on failure
+ */
+int ecat_master_configure(ecat_master_instance_t *inst, edog_logger_t *logger);
+
+/**
+ * @brief Transition all slaves to OPERATIONAL state
+ *
+ * Performs initialization steps 6-7:
+ *   6. Wait for SAFE_OP state
+ *   7. Request and poll for OPERATIONAL state
+ *
+ * Uses per-slave safeop_to_op_timeout_ms from the configuration (the
+ * maximum across all slaves is applied to the broadcast statecheck).
+ *
+ * @param inst   Per-master instance (for config and SOEM context)
+ * @param logger Logger
+ * @return 0 on success, -1 on failure
+ */
+int ecat_master_transition_to_op(ecat_master_instance_t *inst, edog_logger_t *logger);
+
+/**
+ * @brief Validate bus topology against configuration
+ *
+ * Compares the slaves found on the bus with the expected configuration:
+ * - Number of slaves must match
+ * - For each slave: vendor_id and product_code must match
+ *
+ * @param inst   Per-master instance
+ * @param logger Logger
+ * @return 0 on success, -1 on mismatch
+ */
+int ecat_master_validate_topology(ecat_master_instance_t *inst, edog_logger_t *logger);
+
+/**
+ * @brief Close the EtherCAT master
+ *
+ * Transitions all slaves to INIT state and closes the network interface.
+ *
+ * @param inst   Per-master instance
+ * @param logger Logger
+ */
+void ecat_master_close(ecat_master_instance_t *inst, edog_logger_t *logger);
+
+/**
+ * @brief Exchange process data with all slaves
+ *
+ * Sends outputs to slaves and receives inputs.
+ *
+ * @param inst       Per-master instance
+ * @param timeout_us Receive timeout in microseconds (0 = use SOEM default)
+ * @return Working counter value from receive, or -1 on error
+ */
+int ecat_master_exchange_processdata(ecat_master_instance_t *inst, int timeout_us);
+
+/**
+ * @brief Get the expected working counter for the bus
+ *
+ * Calculated as: outputsWKC * 2 + inputsWKC for group 0.
+ *
+ * @param inst Per-master instance
+ * @return Expected WKC value
+ */
+int ecat_master_get_expected_wkc(ecat_master_instance_t *inst);
+
+/**
+ * @brief Get a pointer to a live SOEM slave descriptor
+ *
+ * @param inst     Per-master instance
+ * @param position 1-based slave position on the bus
+ * @return Pointer to ec_slavet, or NULL if position is invalid
+ */
+const ec_slavet *ecat_master_get_slave(ecat_master_instance_t *inst, int position);
+
+/**
+ * @brief Get the AL state of a specific slave
+ *
+ * Reads the current state from the SOEM slavelist (cached from last bus read).
+ *
+ * @param inst     Per-master instance
+ * @param position 1-based slave position
+ * @return EC_STATE_* value, or 0 if position is invalid
+ */
+uint16_t ecat_master_get_slave_state(ecat_master_instance_t *inst, int position);
+
+/**
+ * @brief Attempt to recover a slave that has left OPERATIONAL state
+ *
+ * Uses the SOEM recovery pattern:
+ *   - SAFE_OP + ERROR: ACK error, then request OP
+ *   - SAFE_OP: request OP directly
+ *   - Lower states: ecx_reconfig_slave + ecx_recover_slave
+ *
+ * @param inst     Per-master instance
+ * @param position 1-based slave position
+ * @param logger   Logger
+ * @return 1 if recovered to OP, 0 if still recovering, -1 on error
+ */
+int ecat_master_recover_slave(ecat_master_instance_t *inst, int position, edog_logger_t *logger);
+
+/**
+ * @brief Read back all slave states from the bus
+ *
+ * Calls ecx_readstate() to refresh the cached slave states.
+ *
+ * @param inst Per-master instance
+ */
+void ecat_master_read_states(ecat_master_instance_t *inst);
+
+/**
+ * @brief Set every slave's cached state to OP with no AL status code
+ *
+ * What ecx_readstate() stores when all slaves report OP; used when the cyclic AL poll already
+ * shows that, so the monitor puts no frame on the wire. Monitor thread only.
+ *
+ * @param inst Per-master instance
+ */
+void ecat_master_mark_all_operational(ecat_master_instance_t *inst);
+
+/**
+ * @brief Send a BRD of the AL status register without waiting for the reply
+ *
+ * Sent just before the process data, so the process-data receive stores its reply; collect it
+ * with ecat_master_al_poll_collect() in the same cycle.
+ *
+ * @param inst Per-master instance
+ * @return Frame index to collect, or -1 if the frame was not sent
+ */
+int ecat_master_al_poll_send(ecat_master_instance_t *inst);
+
+/**
+ * @brief Collect a reply sent by ecat_master_al_poll_send() and release its frame index
+ *
+ * Never waits. The index is released whether or not the reply arrived.
+ *
+ * @param inst      Per-master instance
+ * @param idx       Index returned by ecat_master_al_poll_send()
+ * @param al_status OR of every slave's AL status register
+ * @param wkc       Number of slaves that answered
+ * @return true if the reply had arrived
+ */
+bool ecat_master_al_poll_collect(ecat_master_instance_t *inst, int idx, uint16_t *al_status,
+                                 int *wkc);
+
+/**
+ * @brief Whether an AL status poll reply shows every slave in OP without error
+ *
+ * @param al_status   OR of every slave's AL status register
+ * @param wkc         Number of slaves that answered
+ * @param slave_count Slaves on the bus
+ * @return true if all slaves answered and all are in OP
+ */
+static inline bool ecat_al_poll_healthy(uint16_t al_status, int wkc, int slave_count)
+{
+    return slave_count > 0 && wkc >= slave_count &&
+           (al_status & (0x0F | EC_STATE_ERROR)) == EC_STATE_OPERATIONAL;
+}
+
+/**
+ * @brief Get a pointer to the IOmap buffer base
+ *
+ * @param inst Per-master instance
+ * @return Pointer to the IOmap buffer, or NULL if not initialized
+ */
+uint8_t *ecat_master_get_iomap(ecat_master_instance_t *inst);
+
+/**
+ * @brief Get the total IOmap size (inputs + outputs)
+ *
+ * @param inst Per-master instance
+ * @return Total bytes used in the IOmap, or 0 if not initialized
+ */
+size_t ecat_master_get_iomap_size(ecat_master_instance_t *inst);
+
+/**
+ * @brief Get the number of slaves discovered on the bus
+ *
+ * @param inst Per-master instance
+ * @return Slave count, or 0 if not initialized
+ */
+int ecat_master_get_slave_count(ecat_master_instance_t *inst);
+
+/** Release what a failed ecx_init() allocated; the context must not be used afterwards. */
+void ecat_soem_release_failed_init(ecx_contextt *ctx);
+
+/**
+ * @brief Read the detected module list (0xF050) of an ETG.5001 coupler.
+ *
+ * 0xF050:0 holds the module count and 0xF050:1..N one UDINT ident each, in slot order
+ * (slot = position in the list + 1). The slave must be in PRE-OP or higher.
+ *
+ * @param idents_out Written: heap array the caller frees, NULL on failure.
+ * @return 0, or -1 with @p err filled (not CoE, no 0xF050, SDO abort, OOM).
+ */
+int ecat_read_module_idents(ecx_contextt *ctx, int slave_pos, uint32_t **idents_out,
+                            int *count_out, char *err, size_t err_size, edog_logger_t *logger);
+
+/**
+ * @brief Read 0xF050 with a temporary SOEM context while no master runs on @p ifname.
+ *
+ * Opens the interface, scans, waits for PRE-OP on the slave, reads, requests INIT and closes.
+ */
+int ecat_scan_modules_offline(const char *ifname, int slave_pos, int preop_timeout_us,
+                              uint32_t **idents_out, int *count_out, char *err,
+                              size_t err_size, edog_logger_t *logger);
+
+/** State of one configured module. @c known is false when its state could not be read. */
+typedef struct {
+    int      slot;
+    uint32_t ident;
+    bool     known;
+    uint8_t  status;
+} ecat_module_diag_t;
+
+/** Coupler diagnostics. @c status_known is false when 0xF100 could not be read. */
+typedef struct {
+    bool                status_known;
+    uint16_t            status_word;
+    ecat_module_diag_t *modules;        /* heap-owned, one per configured module */
+    int                 module_count;
+} ecat_coupler_diag_t;
+
+/**
+ * @brief Read a running modular coupler's status (0xF100) and its modules' states.
+ *
+ * Module state is 0xA000 + (slot - 1) * slot_index_increment, sub-index 1, for every module of
+ * the configuration. Reads that fail or exceed @p budget_ms leave their value unknown. Takes the
+ * master's acyclic lock around each SDO, so the caller must not hold it; free @p out with
+ * ecat_coupler_diag_free.
+ *
+ * @return 0, or -1 with @p err filled when the bus is not running or the slave has no CoE.
+ */
+int ecat_master_read_coupler_diagnostics(ecat_master_instance_t *inst, const ecat_slave_t *slave,
+                                         int budget_ms, ecat_coupler_diag_t *out, char *err,
+                                         size_t err_size, edog_logger_t *logger);
+
+void ecat_coupler_diag_free(ecat_coupler_diag_t *d);
+
+/**
+ * @brief Compare each fixed PDO of a plain CoE slave with the mapping the device reports.
+ *
+ * Runs in PRE-OP before mapping. An unreadable mapping is logged and skipped.
+ *
+ * @return 0, or -1 when a device maps a fixed PDO differently from the configuration.
+ */
+int ecat_master_verify_fixed_pdos(ecat_master_instance_t *inst, edog_logger_t *logger);
+
+#endif /* ETHERCAT_MASTER_H */

@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (c) 2026 Autonomy®
+
+"""
+Base protocol configuration abstract class for OpenPLC Python plugins.
+"""
+
+from abc import ABC
+
+class PluginConfigError(Exception):
+    """Custom exception for plugin configuration errors."""
+    pass
+
+class PluginConfigContract(ABC):
+    """
+    Abstract base class for protocol-specific configurations.
+    """
+    def __init__(self):
+        self.name = "UNDEFINED"
+        self.protocol = "UNDEFINED"
+        self.config = {}
+
+    def import_config_from_file(self, file_path: str):
+        """Creates an instance from a JSON file."""
+        pass
+
+    def validate(self) -> None:
+        """Validates the configuration."""
+        pass
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(CONFIG={self.config})"

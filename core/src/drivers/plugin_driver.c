@@ -1,0 +1,1874 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (c) 2026 Autonomy®
+
+#define PY_SSIZE_T_CLEAN
+
+// Suppress _POSIX_C_SOURCE redefinition warning from Python.h on MSYS2/Cygwin
+// Python.h defines _POSIX_C_SOURCE to 200809L which conflicts with system headers
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcpp"
+#endif
+
+#include <Python.h>
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+#include "../plc_app/debug_write_journal.h"
+#include "../plc_app/image_tables.h"
+#include "../plc_app/journal_buffer.h"
+#include "../plc_app/plc_state_manager.h"
+#include "../plc_app/utils/log.h"
+#include "../plc_app/utils/utils.h"
+#include "plugin_config.h"
+#include "plugin_driver.h"
+#include "plugin_plc_requests.h"
+#include "vpp_plugin_seal.h"
+#include <dlfcn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+/* The image tables come from image_tables.h, included above. This file used to
+ * redeclare all fourteen of them by hand right here -- redundant while the
+ * shapes agreed, and two incompatible declarations in different translation
+ * units the moment they stopped, which C does not diagnose across TUs. There
+ * is one declaration now, `g_image`, and it lives in the header. */
+static PyThreadState *main_tstate = NULL;
+static PyGILState_STATE gstate;
+static int has_python_plugin = 0;
+
+// Prototypes
+static void python_plugin_cleanup(plugin_instance_t *plugin);
+
+// Driver management functions
+plugin_driver_t *plugin_driver_create(void)
+{
+    plugin_driver_t *driver = calloc(1, sizeof(plugin_driver_t));
+    if (!driver)
+    {
+        return NULL;
+    }
+
+    // Buffer access no longer uses a driver-owned mutex: reads go through the
+    // runtime's image_lock()/image_unlock() (flush-on-lock) and writes through
+    // the lock-free journal. Nothing to initialize here.
+    return driver;
+}
+
+// Journal write wrapper functions for plugins
+// These match the function pointer signatures in plugin_types.h and delegate
+// to the journal_buffer.h API with proper type casting.
+
+static int plugin_journal_write_bool(int type, int index, int bit, int value)
+{
+    return journal_write_bool((journal_buffer_type_t)type, (uint16_t)index, (uint8_t)bit,
+                              value != 0);
+}
+
+static int plugin_journal_write_byte(int type, int index, int value)
+{
+    return journal_write_byte((journal_buffer_type_t)type, (uint16_t)index, (uint8_t)value);
+}
+
+static int plugin_journal_write_int(int type, int index, int value)
+{
+    return journal_write_int((journal_buffer_type_t)type, (uint16_t)index, (uint16_t)value);
+}
+
+static int plugin_journal_write_dint(int type, int index, unsigned int value)
+{
+    return journal_write_dint((journal_buffer_type_t)type, (uint16_t)index, (uint32_t)value);
+}
+
+static int plugin_journal_write_lint(int type, int index, unsigned long long value)
+{
+    return journal_write_lint((journal_buffer_type_t)type, (uint16_t)index, (uint64_t)value);
+}
+
+// STruC++ debugger thunks forwarding to ext_strucpp_debug_* loaded from
+// the program .so. All tolerate ext_*==NULL (no program) and return a
+// safe sentinel.
+
+static uint8_t plugin_debug_array_count(void)
+{
+    return ext_strucpp_debug_array_count ? ext_strucpp_debug_array_count() : 0;
+}
+
+static uint16_t plugin_debug_elem_count(uint8_t arr)
+{
+    return ext_strucpp_debug_elem_count ? ext_strucpp_debug_elem_count(arr) : 0;
+}
+
+static uint16_t plugin_debug_size(uint8_t arr, uint16_t elem)
+{
+    return ext_strucpp_debug_size ? ext_strucpp_debug_size(arr, elem) : 0;
+}
+
+static uint16_t plugin_debug_read(uint8_t arr, uint16_t elem, uint8_t *dest)
+{
+    return ext_strucpp_debug_read ? ext_strucpp_debug_read(arr, elem, dest) : 0;
+}
+
+// debug_set/debug_write run on PLUGIN threads. ENQUEUE through the
+// debug-write journal; dispatcher applies at the no-task-running window.
+// Returns 0x7E ok, 0x82 queue full, 0x81 no program.
+
+static uint8_t plugin_debug_set(uint8_t arr, uint16_t elem, bool forcing, const uint8_t *bytes,
+                                uint16_t len)
+{
+    if (!ext_strucpp_debug_set)
+        return 0x81; // no program loaded
+    uint8_t op = forcing ? (uint8_t)DBGW_OP_FORCE : (uint8_t)DBGW_OP_UNFORCE;
+    int rc     = runtime_external_write(arr, elem, op, forcing ? bytes : NULL, forcing ? len : 0);
+    return (rc == 0) ? 0x7E : 0x82;
+}
+
+static uint8_t plugin_debug_write(uint8_t arr, uint16_t elem, const uint8_t *bytes, uint16_t len)
+{
+    if (!ext_strucpp_debug_write)
+        return 0x81; // no program loaded
+    int rc = runtime_external_write(arr, elem, (uint8_t)DBGW_OP_WRITE, bytes, len);
+    return (rc == 0) ? 0x7E : 0x82;
+}
+
+// Map PLCState to FC 0x49 LED values (0 STOPPED, 1 RUNNING, 2 ERROR).
+// INIT/EMPTY report as STOPPED (not executing).
+static int plugin_get_plc_state(void)
+{
+    switch (plc_get_state())
+    {
+    case PLC_STATE_RUNNING:
+        return 1;
+    case PLC_STATE_ERROR:
+        return 2;
+    default:
+        return 0;
+    }
+}
+
+// Python capsule destructor for runtime args
+// Breakpoint here to debug capsule issues
+static void plugin_runtime_args_capsule_destructor(PyObject *capsule)
+{
+    plugin_runtime_args_t *args =
+        (plugin_runtime_args_t *)PyCapsule_GetPointer(capsule, "openplc_runtime_args");
+    if (args)
+    {
+        free_structured_args(args);
+    }
+}
+
+// Create Python capsule with runtime arguments
+static PyObject *create_python_runtime_args_capsule(plugin_runtime_args_t *args)
+{
+    if (!args)
+    {
+        return NULL;
+    }
+
+    // Create a capsule containing the runtime args pointer
+    PyObject *capsule =
+        PyCapsule_New(args, "openplc_runtime_args", plugin_runtime_args_capsule_destructor);
+    if (!capsule)
+    {
+        // If capsule creation fails, we need to free the args manually
+        free_structured_args(args);
+        return NULL;
+    }
+
+    return capsule;
+}
+
+/* Tear down one plugin instance (cleanup hook, dlclose, free). Dispatch
+ * on the slot's CURRENT stored type, not the incoming config's, so a
+ * reordered or type-swapped plugins.conf does not leak handles. Caller
+ * must ensure the plugin is not running. */
+static void teardown_plugin_instance(plugin_instance_t *plugin)
+{
+    if (!plugin)
+        return;
+
+    if (plugin->running)
+    {
+        log_error("[PLUGIN] internal error: tearing down running plugin '%s' — refusing",
+                  plugin->config.name);
+        return;
+    }
+
+    if (plugin->config.type == PLUGIN_TYPE_PYTHON && plugin->python_plugin)
+    {
+        // Also safe on an uninitialised plugin: it still releases
+        // module refs and NULLs python_plugin.
+        python_plugin_cleanup(plugin);
+    }
+    else if (plugin->config.type == PLUGIN_TYPE_NATIVE && plugin->native_plugin)
+    {
+        if (plugin->initialized && plugin->native_plugin->cleanup)
+        {
+            plugin->native_plugin->cleanup();
+        }
+        if (plugin->native_plugin->handle)
+        {
+            dlclose(plugin->native_plugin->handle);
+        }
+        free(plugin->native_plugin);
+        plugin->native_plugin = NULL;
+    }
+
+    plugin->initialized = 0;
+    memset(&plugin->config, 0, sizeof(plugin->config));
+}
+
+int plugin_driver_update_config(plugin_driver_t *driver, const char *config_file)
+{
+    if (!driver || !config_file)
+    {
+        return -1;
+    }
+
+    // Check if config file exists, if not copy from default
+    if (access(config_file, F_OK) != 0)
+    {
+        log_info("Config file %s not found, copying from plugins_default.conf", config_file);
+
+        // Check if default config exists
+        if (access("plugins_default.conf", F_OK) != 0)
+        {
+            log_error("Default config file plugins_default.conf not found");
+            return -1;
+        }
+
+        // Copy default config to target config file
+        FILE *src = fopen("plugins_default.conf", "r");
+        FILE *dst = fopen(config_file, "w");
+
+        if (!src || !dst)
+        {
+            log_error("Failed to copy default config");
+            if (src)
+                fclose(src);
+            if (dst)
+                fclose(dst);
+            return -1;
+        }
+
+        char buffer[1024];
+        size_t bytes;
+        while ((bytes = fread(buffer, 1, sizeof(buffer), src)) > 0)
+        {
+            fwrite(buffer, 1, bytes, dst);
+        }
+
+        fclose(src);
+        fclose(dst);
+        log_info("Successfully copied default config to %s", config_file);
+    }
+
+    plugin_config_t configs[MAX_PLUGINS];
+    int config_count = parse_plugin_config(config_file, configs, MAX_PLUGINS);
+    if (config_count < 0)
+    {
+        return -1;
+    }
+
+    /* Tear down ALL old plugins by their CURRENT stored type (not the
+     * new config's type), so a slot whose type changed does not leak
+     * the old handle. Requires the GIL for any Python teardown; the
+     * rebuild loop's get_symbols handles cold-start itself. */
+    PyGILState_STATE plugin_gstate = PyGILState_LOCKED;
+    int plugin_have_gil            = Py_IsInitialized();
+    if (plugin_have_gil)
+    {
+        plugin_gstate = PyGILState_Ensure();
+    }
+
+    int old_plugin_count = driver->plugin_count;
+    for (int w = 0; w < old_plugin_count; w++)
+    {
+        teardown_plugin_instance(&driver->plugins[w]);
+    }
+
+    /* Reset so a plugins.conf that drops its last Python entry does
+     * not keep the flag at 1 and acquire the GIL for no reason. */
+    has_python_plugin = 0;
+
+    int degraded_count   = 0;
+    driver->plugin_count = config_count;
+
+    for (int w = 0; w < config_count; w++)
+    {
+        plugin_instance_t *plugin = &driver->plugins[w];
+        // Slot already zeroed by the teardown loop (or never used).
+        memcpy(&plugin->config, &configs[w], sizeof(plugin_config_t));
+        plugin->degraded = 0;
+
+        if (configs[w].type == PLUGIN_TYPE_PYTHON)
+        {
+            has_python_plugin = 1;
+            /* Re-import symbols: teardown zeroed python_plugin, so init
+             * would skip without this. get_symbols cold-starts Python
+             * if needed. */
+            if (plugin->config.path[0] != '\0')
+            {
+                if (python_plugin_get_symbols(plugin) != 0)
+                {
+                    if (plugin->config.enabled)
+                    {
+                        /* Fail-safe: an enabled plugin that cannot load its
+                         * symbols is marked degraded and skipped, but does
+                         * NOT abort the whole runtime. Boot proceeds; the
+                         * plugin is simply unavailable until the missing
+                         * dependency is resolved and the runtime restarts. */
+                        log_error("[PLUGIN] enabled Python plugin '%s' failed to load symbols "
+                                  "- continuing without it (plugin unavailable)",
+                                  configs[w].name);
+                        plugin->degraded = 1;
+                        ++degraded_count;
+                    }
+                    else
+                    {
+                        log_warn("[PLUGIN] disabled Python plugin '%s' has no loadable module",
+                                 configs[w].name);
+                    }
+                }
+            }
+        }
+        else if (configs[w].type == PLUGIN_TYPE_NATIVE)
+        {
+            if (native_plugin_get_symbols(plugin) != 0)
+            {
+                if (plugin->config.enabled)
+                {
+                    /* Fail-safe: an enabled plugin that cannot load its
+                     * .so (missing runtime dep, e.g. Npcap on Windows)
+                     * is marked degraded and skipped, so the PLC can
+                     * still reach RUNNING. */
+                    log_error("[PLUGIN] enabled native plugin '%s' failed to load symbols "
+                              "- continuing without it (plugin unavailable)",
+                              configs[w].name);
+                    plugin->degraded = 1;
+                    ++degraded_count;
+                }
+                else
+                {
+                    log_warn("[PLUGIN] disabled native plugin '%s' has no loadable .so",
+                             configs[w].name);
+                }
+            }
+        }
+    }
+
+    if (plugin_have_gil)
+    {
+        PyGILState_Release(plugin_gstate);
+    }
+
+    if (degraded_count > 0)
+    {
+        log_warn("[PLUGIN] %d enabled plugin(s) failed to load and are unavailable; "
+                 "the runtime will continue without them",
+                 degraded_count);
+    }
+
+    /* A failed symbol load is no longer fatal — the runtime stays out of
+     * ERROR. Only hard errors above (config parse / file copy) return -1. */
+    return 0;
+}
+
+int plugin_driver_append_config(plugin_driver_t *driver, const char *config_file)
+{
+    if (!driver || !config_file)
+    {
+        return -1;
+    }
+
+    if (access(config_file, F_OK) != 0)
+    {
+        /* File absent is not an error — VPP is optional. */
+        return 0;
+    }
+
+    plugin_config_t configs[MAX_PLUGINS];
+    /* This config file comes from the user's upload (the editor writes it and
+     * webserver/plcapp_management.py copies it verbatim), so its paths are
+     * parsed under containment: no "..", no absolute paths. */
+    int config_count = parse_plugin_config_contained(config_file, configs, MAX_PLUGINS);
+    if (config_count < 0)
+    {
+        return -1;
+    }
+
+    int degraded_count = 0;
+
+    for (int w = 0; w < config_count; w++)
+    {
+        /* Skip if we'd overflow the driver's plugin array. */
+        if (driver->plugin_count >= MAX_PLUGINS)
+        {
+            log_warn("[PLUGIN] plugin_driver_append_config: MAX_PLUGINS reached, skipping '%s'",
+                     configs[w].name);
+            break;
+        }
+
+        plugin_instance_t *plugin = &driver->plugins[driver->plugin_count];
+        memset(plugin, 0, sizeof(*plugin));
+        memcpy(&plugin->config, &configs[w], sizeof(plugin_config_t));
+        driver->plugin_count++;
+
+        if (configs[w].type == PLUGIN_TYPE_NATIVE)
+        {
+            if (native_plugin_get_symbols(plugin) != 0)
+            {
+                if (plugin->config.enabled)
+                {
+                    /* Fail-safe: degrade rather than abort (see
+                     * plugin_driver_update_config for rationale). */
+                    log_error("[PLUGIN] enabled VPP plugin '%s' failed to load symbols "
+                              "- continuing without it (plugin unavailable)",
+                              configs[w].name);
+                    plugin->degraded = 1;
+                    ++degraded_count;
+                }
+                else
+                {
+                    log_warn("[PLUGIN] disabled VPP plugin '%s' has no loadable .so",
+                             configs[w].name);
+                }
+            }
+        }
+    }
+
+    if (degraded_count > 0)
+    {
+        log_warn("[PLUGIN] %d enabled VPP plugin(s) failed to load and are unavailable; "
+                 "the runtime will continue without them",
+                 degraded_count);
+    }
+
+    /* Failed symbol loads are non-fatal; the runtime continues without them. */
+    return 0;
+}
+
+int plugin_driver_load_config(plugin_driver_t *driver, const char *config_file)
+{
+    if (!driver || !config_file)
+    {
+        return -1;
+    }
+
+    /* update_config does the full teardown + rebuild including symbol
+     * loading, so just forward. Re-calling get_symbols here would leak
+     * the freshly-allocated bundles. */
+    return plugin_driver_update_config(driver, config_file);
+}
+
+// Send to plugin init function all args
+/**
+ * The fourteen table lengths, for a plugin that asked to be told.
+ *
+ * Read once per plugin_driver_init() rather than cached: the image is
+ * reallocated on every program load, and a cached copy is exactly the stale
+ * state this symbol exists to prevent.
+ */
+static uint32_t image_sizes_snapshot(uint32_t *out, uint32_t cap)
+{
+    uint32_t n = 0;
+    for (int id = 0; id < IMAGE_TABLE_COUNT && n < cap; ++id)
+    {
+        out[n++] = image_table_capacity((image_table_id_t)id);
+    }
+    return n;
+}
+
+/**
+ * Hand one plugin the fourteen lengths, before its init() runs.
+ *
+ * Returns 0 when the plugin has nothing to be told or accepted them, and
+ * non-zero when it refused -- which fails the plugin exactly as a failed
+ * init() does, because a plugin that cannot make sense of the image it is
+ * about to be handed should not be handed it.
+ */
+static int deliver_image_sizes(plugin_instance_t *plugin)
+{
+    uint32_t sizes[IMAGE_TABLE_COUNT];
+    const uint32_t count = image_sizes_snapshot(sizes, IMAGE_TABLE_COUNT);
+
+    if (plugin->config.type == PLUGIN_TYPE_NATIVE && plugin->native_plugin &&
+        plugin->native_plugin->set_image_sizes)
+    {
+        const int rc = plugin->native_plugin->set_image_sizes(sizes, count);
+        if (rc != 0)
+        {
+            log_error("Plugin '%s' refused the image sizes (returned %d)", plugin->config.name, rc);
+            return rc;
+        }
+    }
+
+    if (plugin->config.type == PLUGIN_TYPE_PYTHON && plugin->python_plugin &&
+        plugin->python_plugin->pFuncSetImageSizes)
+    {
+        PyObject *list = PyList_New((Py_ssize_t)count);
+        if (!list)
+        {
+            PyErr_Clear();
+            log_error("Plugin '%s': could not build the image size list", plugin->config.name);
+            return -1;
+        }
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            /* PyList_SetItem steals the reference, so the item is built first
+             * and checked: handing it a NULL leaves a hole the call below
+             * dereferences. */
+            PyObject *item = PyLong_FromUnsignedLong(sizes[i]);
+            if (!item)
+            {
+                PyErr_Clear();
+                Py_DECREF(list);
+                log_error("Plugin '%s': could not build the image size list",
+                          plugin->config.name);
+                return -1;
+            }
+            PyList_SetItem(list, (Py_ssize_t)i, item);
+        }
+        PyObject *result =
+            PyObject_CallFunctionObjArgs(plugin->python_plugin->pFuncSetImageSizes, list, NULL);
+        Py_DECREF(list);
+        if (!result)
+        {
+            PyErr_Print();
+            log_error("Plugin '%s' raised in set_image_sizes", plugin->config.name);
+            return -1;
+        }
+        Py_DECREF(result);
+    }
+
+    return 0;
+}
+
+bool plugin_driver_all_understand_per_table_sizes(plugin_driver_t *driver,
+                                                  const char **first_without)
+{
+    if (first_without)
+        *first_without = NULL;
+    if (!driver)
+        return false;
+
+    for (int i = 0; i < driver->plugin_count; i++)
+    {
+        plugin_instance_t *plugin = &driver->plugins[i];
+        bool understands          = false;
+
+        /* A DEGRADED PLUGIN DOES NOT GET A VOTE.
+         *
+         * It failed to load, so plugin_driver_init skips it in every branch:
+         * it never receives runtime args and never touches the image. Letting
+         * it answer "no" would mean one box missing Npcap, where the EtherCAT
+         * plugin degrades, silently costs every OTHER plugin its per-table
+         * image -- a downgrade with no relation to anything that will actually
+         * read the tables.
+         *
+         * DISABLED plugins still vote, deliberately: plugin_driver_init
+         * initialises them regardless of the enabled flag, so a disabled
+         * plugin does hold the base pointers and does read the image. */
+        if (plugin->degraded)
+            continue;
+
+        /* NOR DOES ONE WITH NO MODULE LOADED. A disabled plugin whose symbols
+         * fail to load is warned about, not degraded, and init skips it the
+         * same way, so it never holds a base pointer. */
+        if (plugin->config.type == PLUGIN_TYPE_NATIVE && !plugin->native_plugin)
+            continue;
+        if (plugin->config.type == PLUGIN_TYPE_PYTHON && !plugin->python_plugin)
+            continue;
+
+        if (plugin->config.type == PLUGIN_TYPE_NATIVE)
+            understands = plugin->native_plugin->set_image_sizes != NULL;
+        else if (plugin->config.type == PLUGIN_TYPE_PYTHON)
+            understands = plugin->python_plugin->pFuncSetImageSizes != NULL;
+
+        if (!understands)
+        {
+            if (first_without)
+                *first_without = plugin->config.name;
+            return false;
+        }
+    }
+    return true;
+}
+
+int plugin_driver_init(plugin_driver_t *driver)
+{
+    if (!driver)
+    {
+        return -1;
+    }
+
+    // Only acquire Python GIL if we have Python plugins and Python is initialized
+    // Initialize to PyGILState_LOCKED (0) to satisfy compiler warning
+    PyGILState_STATE local_gstate = PyGILState_LOCKED;
+    int have_gil                  = has_python_plugin && Py_IsInitialized();
+    if (have_gil)
+    {
+        local_gstate = PyGILState_Ensure();
+    }
+
+    // Initialize ALL plugins regardless of enabled flag (needed for
+    // features like EtherCAT slave scanning from the editor).
+    // init() must only set up internal state; starting is in start_loop.
+    for (int i = 0; i < driver->plugin_count; i++)
+    {
+        plugin_instance_t *plugin = &driver->plugins[i];
+
+        if (plugin->config.type == PLUGIN_TYPE_PYTHON && plugin->python_plugin &&
+            plugin->python_plugin->pFuncInit)
+        {
+            // Generate structured args for Python plugin
+            PyObject *args =
+                (PyObject *)generate_structured_args_with_driver(PLUGIN_TYPE_PYTHON, driver, i);
+            if (!args)
+            {
+                log_error("Failed to generate runtime args for plugin: %s", plugin->config.name);
+
+                if (have_gil)
+                {
+                    PyGILState_Release(local_gstate);
+                }
+                return -1;
+            }
+            /* BEFORE init(), because init() is where a plugin copies the
+             * base pointers by value and decides how big everything is.
+             * Delivering afterwards leaves a window, once per load, in which
+             * the plugin holds new pointers and previous sizes. */
+            if (deliver_image_sizes(plugin) != 0)
+            {
+                Py_DECREF(args);
+                if (have_gil)
+                    PyGILState_Release(local_gstate);
+                return -1;
+            }
+
+            // Call the Python init function with proper capsule
+            PyObject *result =
+                PyObject_CallFunctionObjArgs(plugin->python_plugin->pFuncInit, args, NULL);
+
+            // Store the capsule reference for the lifetime of the plugin
+            plugin->python_plugin->args_capsule = args;
+
+            if (!result)
+            {
+                PyErr_Print();
+                log_error("Python init function failed for plugin: %s", plugin->config.name);
+
+                if (have_gil)
+                {
+                    PyGILState_Release(local_gstate);
+                }
+                return -1;
+            }
+            Py_DECREF(result);
+            plugin->initialized = 1;
+        }
+        else if (plugin->config.type == PLUGIN_TYPE_NATIVE && plugin->native_plugin &&
+                 plugin->native_plugin->init)
+        {
+            // Generate structured args for native plugin
+            plugin_runtime_args_t *args =
+                (plugin_runtime_args_t *)generate_structured_args_with_driver(PLUGIN_TYPE_NATIVE,
+                                                                              driver, i);
+            if (!args)
+            {
+                log_error("Failed to generate runtime args for native plugin: %s",
+                          plugin->config.name);
+                if (have_gil)
+                {
+                    PyGILState_Release(local_gstate);
+                }
+                return -1;
+            }
+
+            /* BEFORE init(), for the same reason as the Python path above. */
+            if (deliver_image_sizes(plugin) != 0)
+            {
+                free_structured_args(args);
+                if (have_gil)
+                    PyGILState_Release(local_gstate);
+                return -1;
+            }
+
+            // Call the native init function
+            int result = plugin->native_plugin->init(args);
+            if (result != 0)
+            {
+                log_error("Native init function failed for plugin: %s (returned %d)",
+                          plugin->config.name, result);
+                free_structured_args(args);
+                if (have_gil)
+                {
+                    PyGILState_Release(local_gstate);
+                }
+                return -1;
+            }
+
+            // Free the args after successful initialization
+            free_structured_args(args);
+            plugin->initialized = 1;
+        }
+    }
+
+    if (have_gil)
+    {
+        PyGILState_Release(local_gstate);
+    }
+
+    return 0;
+}
+
+int plugin_driver_any_initialized(plugin_driver_t *driver)
+{
+    if (!driver)
+        return 0;
+    for (int i = 0; i < driver->plugin_count; i++)
+    {
+        if (driver->plugins[i].initialized)
+            return 1;
+    }
+    return 0;
+}
+
+int plugin_driver_cleanup_init(plugin_driver_t *driver)
+{
+    if (!driver)
+        return 0;
+
+    PyGILState_STATE local_gstate = PyGILState_LOCKED;
+    int have_gil                  = has_python_plugin && Py_IsInitialized();
+    if (have_gil)
+        local_gstate = PyGILState_Ensure();
+
+    int cleaned = 0;
+    /* Reverse order so dependent plugins (declared later, depend on
+     * resources owned by earlier plugins) tear down first. */
+    for (int i = driver->plugin_count - 1; i >= 0; --i)
+    {
+        plugin_instance_t *plugin = &driver->plugins[i];
+        if (!plugin->initialized)
+            continue;
+
+        if (plugin->config.type == PLUGIN_TYPE_PYTHON && plugin->python_plugin)
+        {
+            python_plugin_cleanup(plugin);
+        }
+        else if (plugin->config.type == PLUGIN_TYPE_NATIVE && plugin->native_plugin &&
+                 plugin->native_plugin->cleanup)
+        {
+            plugin->native_plugin->cleanup();
+        }
+        plugin->initialized = 0;
+        ++cleaned;
+    }
+
+    if (have_gil)
+        PyGILState_Release(local_gstate);
+    return cleaned;
+}
+
+void plugin_driver_release_gil(void)
+{
+    if (!Py_IsInitialized())
+    {
+        return;
+    }
+    /* Idempotent: a second call with the GIL already released would be calling
+     * PyEval_SaveThread() without holding it. */
+    if (main_tstate != NULL)
+    {
+        return;
+    }
+    main_tstate = PyEval_SaveThread();
+}
+
+// Call the thread function for each plugin
+int plugin_driver_start(plugin_driver_t *driver)
+{
+    if (!driver)
+    {
+        return -1;
+    }
+
+    if (driver->plugin_count == 0)
+    {
+        log_info("No plugins to start");
+        return 0;
+    }
+
+    // Release the GIL for plugin threads. Do NOT store the saved state
+    // in main_tstate (that is owned by plugin_driver_release_gil on the
+    // MAIN thread, and must survive Py_FinalizeEx).
+    if (has_python_plugin && Py_IsInitialized())
+    {
+        gstate = PyGILState_Ensure();
+        PyEval_SaveThread();
+    }
+
+    for (int i = 0; i < driver->plugin_count; i++)
+    {
+        plugin_instance_t *plugin = &driver->plugins[i];
+
+        // Skip disabled plugins
+        if (!plugin->config.enabled)
+        {
+            log_info("Skipping disabled plugin during start: %s", plugin->config.name);
+            continue;
+        }
+
+        switch (plugin->config.type)
+        {
+        case PLUGIN_TYPE_PYTHON:
+        {
+            // Python plugins run asynchronously in their own threads.
+            // NOTE: The thread is created python-side
+            if (plugin->python_plugin && plugin->python_plugin->pFuncStart)
+            {
+                // Acquire GIL for this specific Python call
+                PyGILState_STATE local_gil = PyGILState_Ensure();
+                PyObject *res              = PyObject_CallNoArgs(plugin->python_plugin->pFuncStart);
+                if (!res)
+                {
+                    PyErr_Print();
+                    log_error("Python start call failed for plugin: %s", plugin->config.name);
+                }
+                else
+                {
+                    log_info("Plugin %s started successfully", plugin->config.name);
+                    Py_DECREF(res);
+                    plugin->running = 1;
+                }
+                PyGILState_Release(local_gil);
+            }
+            else
+            {
+                log_warn("Python plugin %s does not have a start_loop function",
+                         plugin->config.name);
+            }
+        }
+        break;
+
+        case PLUGIN_TYPE_NATIVE:
+        {
+            // Native plugins run synchronously - call start_loop if available
+            if (plugin->native_plugin && plugin->native_plugin->start)
+            {
+                int result = plugin->native_plugin->start();
+                if (result == 0)
+                {
+                    log_info("Native plugin %s started successfully", plugin->config.name);
+                    plugin->running = 1;
+                }
+                else
+                {
+                    log_error("Native plugin %s failed to start (returned %d)", plugin->config.name,
+                              result);
+                }
+            }
+            else
+            {
+                log_warn("Native plugin %s does not have a start_loop function",
+                         plugin->config.name);
+            }
+        }
+        break;
+
+        default:
+            break;
+        }
+    }
+    // Don't call PyGILState_Release here since we used PyEval_SaveThread
+    // The GIL will be restored in plugin_driver_destroy
+    return 0;
+}
+
+int plugin_driver_stop(plugin_driver_t *driver)
+{
+    log_info("Stopping all plugins...");
+    if (!driver)
+    {
+        return -1;
+    }
+
+    if (driver->plugin_count == 0)
+    {
+        log_info("No plugins to stop");
+        return 0;
+    }
+
+    int stop_failed = 0;
+
+    // Only acquire Python GIL if we have Python plugins and Python is initialized
+    PyGILState_STATE local_gstate;
+    int need_gil = has_python_plugin && Py_IsInitialized();
+    if (need_gil)
+    {
+        local_gstate = PyGILState_Ensure();
+    }
+
+    // Stop all running plugins.
+    // Use the running flag (not enabled) because a plugin may have been
+    // disabled via config update while still running.
+    for (int i = 0; i < driver->plugin_count; i++)
+    {
+        plugin_instance_t *plugin = &driver->plugins[i];
+
+        if (!plugin->running)
+        {
+            continue;
+        }
+
+        log_info("Stopping plugin %d/%d: %s", i + 1, driver->plugin_count, plugin->config.name);
+        if (plugin->python_plugin && plugin->python_plugin->pFuncStop)
+        {
+            PyObject *res = PyObject_CallNoArgs(plugin->python_plugin->pFuncStop);
+            if (!res)
+            {
+                PyErr_Print();
+                log_error("Python stop call failed for plugin: %s", plugin->config.name);
+                stop_failed = 1;
+            }
+            else
+            {
+                int success = PyObject_IsTrue(res);
+                Py_DECREF(res);
+                if (success == 1)
+                {
+                    log_info("Plugin %s stopped successfully", plugin->config.name);
+                }
+                else
+                {
+                    log_error("Plugin %s failed to stop cleanly", plugin->config.name);
+                    stop_failed = 1;
+                }
+            }
+            plugin->running = 0;
+        }
+        else if (plugin->native_plugin && plugin->native_plugin->stop)
+        {
+            plugin->native_plugin->stop();
+            log_info("Native plugin %s stopped successfully", plugin->config.name);
+            plugin->running = 0;
+        }
+    }
+
+    if (need_gil)
+    {
+        PyGILState_Release(local_gstate);
+    }
+
+    return stop_failed ? -1 : 0;
+}
+
+void plugin_driver_destroy(plugin_driver_t *driver)
+{
+    if (!driver)
+    {
+        return;
+    }
+
+    if (driver->plugin_count == 0)
+    {
+        log_info("No plugins to destroy");
+        free(driver);
+        return;
+    }
+
+    // Check if Python is initialized before any Python operations
+    int python_initialized = has_python_plugin && Py_IsInitialized();
+    // Initialize to PyGILState_LOCKED (0) to satisfy compiler warning
+    PyGILState_STATE local_gstate = PyGILState_LOCKED;
+
+    if (python_initialized)
+    {
+        local_gstate = PyGILState_Ensure();
+    }
+
+    plugin_driver_stop(driver);
+
+    for (int i = 0; i < driver->plugin_count; i++)
+    {
+        plugin_instance_t *plugin = &driver->plugins[i];
+        if (plugin->python_plugin && python_initialized && plugin->initialized)
+        {
+            python_plugin_cleanup(plugin);
+            plugin->initialized = 0;
+        }
+        if (plugin->native_plugin)
+        {
+            // Call cleanup function if available, but only if init() ran.
+            if (plugin->initialized && plugin->native_plugin->cleanup)
+            {
+                plugin->native_plugin->cleanup();
+                log_info("Native plugin %s cleaned up successfully", plugin->config.name);
+            }
+            plugin->initialized = 0;
+            // Close the shared library handle
+            if (plugin->native_plugin->handle)
+            {
+                dlclose(plugin->native_plugin->handle);
+                plugin->native_plugin->handle = NULL;
+            }
+
+            free(plugin->native_plugin);
+            plugin->native_plugin = NULL;
+        }
+    }
+
+    if (python_initialized)
+    {
+        /* Py_FinalizeEx needs the GIL. If main_tstate is NULL (the PLC
+         * never ran), keep the state PyGILState_Ensure gave us above
+         * instead of dropping it. */
+        if (main_tstate != NULL)
+        {
+            PyGILState_Release(local_gstate);
+            PyEval_RestoreThread(main_tstate);
+            /* Consumed: a second destroy must not restore a stale state. */
+            main_tstate = NULL;
+        }
+        Py_FinalizeEx();
+    }
+
+    free(driver);
+}
+
+// Runtime arguments generation functions
+
+/**
+ * @brief Generate structured arguments for plugin initialization
+ *
+ * This function creates a structured argument containing all runtime buffers,
+ * mutex functions, and metadata needed by external plugins.
+ *
+ * @param type Type of plugin (PLUGIN_TYPE_PYTHON or PLUGIN_TYPE_NATIVE)
+ * @param driver Pointer to plugin driver (for buffer mutex)
+ * @return Pointer to allocated structure/capsule, or NULL on error
+ *
+ * For PLUGIN_TYPE_NATIVE: Returns plugin_runtime_args_t*
+ * For PLUGIN_TYPE_PYTHON: Returns PyObject* (PyCapsule containing plugin_runtime_args_t*)
+ */
+void *generate_structured_args_with_driver(plugin_type_t type, plugin_driver_t *driver,
+                                           int plugin_index)
+{
+    log_debug("Generating structured args for plugin type %d", type);
+
+    if (!driver)
+    {
+        log_error("Error - driver is NULL");
+        return NULL;
+    }
+
+    plugin_runtime_args_t *args = malloc(sizeof(plugin_runtime_args_t));
+    if (!args)
+    {
+        log_error("Error - failed to allocate memory for runtime args");
+        return NULL;
+    }
+
+    log_debug("Allocated runtime args structure (size: %zu bytes)", sizeof(plugin_runtime_args_t));
+
+    /* THE ORDERING INVARIANT, checked rather than assumed, and checked BEFORE
+     * the pointers are copied because copying null ones is the whole problem.
+     *
+     * The image has to be allocated by now: what is copied below is what both
+     * native plugins cache BY VALUE inside their init(), and they hold it for
+     * the rest of the run. Nothing in the code enforces the order -- it is a
+     * property of where plc_state_manager.cpp happens to call things, and it is
+     * exactly the invariant a later refactor moves without noticing. The
+     * symptom would not be a crash: plugins would hold null tables and a
+     * buffer_size of zero, which every bounds check reads as "refuse every
+     * index", so it would present as I/O that silently does nothing.
+     *
+     * Deliberately not assert(), which vanishes under NDEBUG. This has to hold
+     * in the field, not only in a debug build. */
+    if (image_tables_capacity() == 0)
+    {
+        log_error("[PLUGIN]: runtime args requested before the image was allocated — "
+                  "plugins would cache null tables; refusing");
+        free(args);
+        return NULL;
+    }
+
+    // Initialize all buffer pointers
+    args->bool_input  = g_image.bool_input;
+    args->bool_output = g_image.bool_output;
+    args->byte_input  = g_image.byte_input;
+    args->byte_output = g_image.byte_output;
+    args->int_input   = g_image.int_input;
+    args->int_output  = g_image.int_output;
+    args->dint_input  = g_image.dint_input;
+    args->dint_output = g_image.dint_output;
+    args->lint_input  = g_image.lint_input;
+    args->lint_output = g_image.lint_output;
+    args->int_memory  = g_image.int_memory;
+    args->dint_memory = g_image.dint_memory;
+    args->lint_memory = g_image.lint_memory;
+    args->bool_memory = g_image.bool_memory;
+
+    // Flush-on-lock image read API (image mutex + journal drain). Points
+    // directly at the runtime's image_tables entries; writes use the journal.
+    args->image_lock   = image_lock;
+    args->image_unlock = image_unlock;
+    // STruC++ debugger surface — replaces the MatIEC-era
+    // get_var_list / get_var_size / get_var_count flat-index API.
+    // Each thunk forwards to the corresponding ext_strucpp_debug_*
+    // function pointer resolved from the program .so. NULL-safe.
+    args->debug_array_count = plugin_debug_array_count;
+    args->debug_elem_count  = plugin_debug_elem_count;
+    args->debug_size        = plugin_debug_size;
+    args->debug_read        = plugin_debug_read;
+    args->debug_set         = plugin_debug_set;
+    args->debug_write       = plugin_debug_write;
+
+    // Initialize plugin specific config path as empty
+    memset(args->plugin_specific_config_file_path, '\0',
+           sizeof(args->plugin_specific_config_file_path));
+
+    memcpy(args->plugin_specific_config_file_path,
+           driver->plugins[plugin_index].config.plugin_related_config_path,
+           sizeof(driver->plugins[plugin_index].config.plugin_related_config_path));
+
+    // Initialize buffer size info
+    /* THE SMALLEST OF THE FOURTEEN, not the length they all share.
+     *
+     * The tables no longer have one length, and this field cannot say so --
+     * CON06 keeps the struct's offsets fixed. The minimum is the only safe
+     * single number for a consumer that has not been told they can differ:
+     * bounding by it refuses an index, where bounding by the largest reads
+     * past every shorter table.
+     *
+     * ethercat_io.c and s7comm no longer derive their clamps from this field;
+     * they export set_image_sizes and bound by the table each access actually
+     * addresses, falling back here only when the sizes were never delivered.
+     * plugin_types.h carries the same statement for plugin authors, and
+     * journal_buffer.h for the runtime's own copy. */
+    args->buffer_size     = (int)image_tables_capacity();
+    args->bits_per_buffer = 8;
+
+    // Initialize logging functions
+    args->log_info  = log_info;
+    args->log_debug = log_debug;
+    args->log_warn  = log_warn;
+    args->log_error = log_error;
+
+    // Initialize journal write functions for race-condition-free buffer writes
+    args->journal_write_bool = plugin_journal_write_bool;
+    args->journal_write_byte = plugin_journal_write_byte;
+    args->journal_write_int  = plugin_journal_write_int;
+    args->journal_write_dint = plugin_journal_write_dint;
+    args->journal_write_lint = plugin_journal_write_lint;
+
+    // Plugin-initiated async PLC stop (for unrecoverable hardware faults).
+    args->request_plc_stop = plugin_request_plc_stop;
+
+    // Run/stop control: the same transition path the socket START / STOP
+    // commands drive, plus the mode-switch store the runtime gates starts on
+    // and the state read a plugin uses to drive a status LED.
+    args->request_plc_start   = plugin_request_plc_start;
+    args->set_switch_position = plugin_set_switch_position;
+    args->get_plc_state       = plugin_get_plc_state;
+
+    // PLC base tick time. Runtime owns base_tick_ns; on first plugin init
+    // (before symbols_init) it carries the 20 ms default, so plugins must
+    // guard against the value being smaller than their needed resolution.
+    args->base_tick_ns = base_tick_ns;
+
+    // Validate critical pointers
+    if (!args->image_lock || !args->image_unlock)
+    {
+        log_error("Error - image lock function pointers are NULL");
+        free(args);
+        return NULL;
+    }
+
+    switch (type)
+    {
+    case PLUGIN_TYPE_NATIVE:
+        log_debug("Returning native plugin args");
+        // For native plugins, return the structure directly
+        return args;
+
+    case PLUGIN_TYPE_PYTHON:
+        log_debug("Creating Python capsule for args");
+        // For Python plugins, wrap in a PyCapsule
+        PyObject *capsule = create_python_runtime_args_capsule(args);
+        if (!capsule)
+        {
+            log_error("Error - failed to create Python capsule");
+            // Note: create_python_runtime_args_capsule already freed args on failure
+            return NULL;
+        }
+        log_debug("Python capsule created successfully");
+        return capsule;
+
+    default:
+        log_error("Error - unknown plugin type: %d", type);
+        // Unknown type, clean up and return NULL
+        free(args);
+        return NULL;
+    }
+}
+
+// Free structured arguments
+void free_structured_args(plugin_runtime_args_t *args)
+{
+    if (args)
+    {
+        // No dynamic allocations inside the structure to free
+        // Just free the main structure
+        free(args);
+    }
+}
+
+int python_plugin_get_symbols(plugin_instance_t *plugin)
+{
+    if (!plugin || plugin->config.path[0] == '\0')
+    {
+        return -1;
+    }
+
+    // Allocate python binds structure
+    python_binds_t *py_binds = calloc(1, sizeof(python_binds_t));
+    if (!py_binds)
+    {
+        return -1;
+    }
+
+    // Initialize Python if not already initialized
+    if (!Py_IsInitialized())
+    {
+        Py_Initialize();
+    }
+
+    // Extract module name from plugin path
+    // Remove .py extension and directory path if present
+    char module_name[256];
+    const char *filename = strrchr(plugin->config.path, '/');
+    if (filename)
+    {
+        filename++; // Skip the '/'
+    }
+    else
+    {
+        filename = plugin->config.path;
+    }
+
+    // Copy filename without .py extension
+    strncpy(module_name, filename, sizeof(module_name) - 1);
+    module_name[sizeof(module_name) - 1] = '\0';
+    char *dot                            = strrchr(module_name, '.');
+    if (dot && strcmp(dot, ".py") == 0)
+    {
+        *dot = '\0';
+    }
+
+    // Add plugin directory to Python path
+    char python_path_cmd[512];
+    const char *plugin_dir = strrchr(plugin->config.path, '/');
+    if (plugin_dir)
+    {
+        int dir_len = plugin_dir - plugin->config.path;
+        char dir_path[256];
+        strncpy(dir_path, plugin->config.path, dir_len);
+        dir_path[dir_len] = '\0';
+        snprintf(python_path_cmd, sizeof(python_path_cmd), "import sys; sys.path.insert(0, '%s')",
+                 dir_path);
+    }
+    else
+    {
+        snprintf(python_path_cmd, sizeof(python_path_cmd), "import sys; sys.path.insert(0, '.')");
+    }
+
+    PyRun_SimpleString(python_path_cmd);
+
+    // Setup virtual environment if specified
+    if (strlen(plugin->config.venv_path) > 0)
+    {
+        // Construct the venv site-packages path
+        char venv_site_packages[512];
+        snprintf(venv_site_packages, sizeof(venv_site_packages), "%s/lib/python%d.%d/site-packages",
+                 plugin->config.venv_path, PY_MAJOR_VERSION, PY_MINOR_VERSION);
+        // Get sys.path
+        PyObject *sys_path = PySys_GetObject("path");
+        if (sys_path && PyList_Check(sys_path))
+        {
+            PyObject *venv_path_obj = PyUnicode_FromString(venv_site_packages);
+            int found               = PySequence_Contains(sys_path, venv_path_obj);
+            if (found == 0)
+            { // Not found
+                if (PyList_Insert(sys_path, 0, venv_path_obj) != 0)
+                {
+                    log_error("Failed to insert venv path into sys.path for plugin: %s",
+                              plugin->config.name);
+                    Py_DECREF(venv_path_obj);
+                    free(py_binds);
+                    return -1;
+                }
+            }
+            Py_DECREF(venv_path_obj);
+        }
+        else
+        {
+            log_error("Failed to get sys.path for plugin: %s", plugin->config.name);
+            free(py_binds);
+            return -1;
+        }
+        log_info("Using venv for %s: %s", plugin->config.name, venv_site_packages);
+    }
+
+    // Load the Python module
+    py_binds->pModule = PyImport_ImportModule(module_name);
+    if (!py_binds->pModule)
+    {
+        log_error("Failed to load Python module '%s' from path '%s'", module_name,
+                  plugin->config.path);
+        PyErr_Print();
+        free(py_binds);
+        return -1;
+    }
+
+    // Get function references based on python_binds_t structure
+    py_binds->pFuncInit = PyObject_GetAttrString(py_binds->pModule, "init");
+    if (!py_binds->pFuncInit || !PyCallable_Check(py_binds->pFuncInit))
+    {
+        log_error("Error: 'init' function not found or not callable in module '%s' - this function "
+                  "is required",
+                  module_name);
+        Py_XDECREF(py_binds->pModule);
+        free(py_binds);
+        return -1;
+    }
+
+    py_binds->pFuncStart = PyObject_GetAttrString(py_binds->pModule, "start_loop");
+    if (!py_binds->pFuncStart || !PyCallable_Check(py_binds->pFuncStart))
+    {
+        // start_loop is optional
+        Py_XDECREF(py_binds->pFuncStart);
+        py_binds->pFuncStart = NULL;
+        /* A failed PyObject_GetAttrString leaves an AttributeError SET, and an
+         * optional lookup does not return, so it has to be cleared here or the
+         * next CPython call reports this absence as its own failure. */
+        PyErr_Clear();
+    }
+
+    py_binds->pFuncStop = PyObject_GetAttrString(py_binds->pModule, "stop_loop");
+    if (!py_binds->pFuncStop || !PyCallable_Check(py_binds->pFuncStop))
+    {
+        // stop_loop is optional
+        Py_XDECREF(py_binds->pFuncStop);
+        py_binds->pFuncStop = NULL;
+        /* A failed PyObject_GetAttrString leaves an AttributeError SET, and an
+         * optional lookup does not return, so it has to be cleared here or the
+         * next CPython call reports this absence as its own failure. */
+        PyErr_Clear();
+    }
+
+    py_binds->pFuncSetImageSizes = PyObject_GetAttrString(py_binds->pModule, "set_image_sizes");
+    if (!py_binds->pFuncSetImageSizes || !PyCallable_Check(py_binds->pFuncSetImageSizes))
+    {
+        /* Optional. PyErr_Clear() is not decoration: a failed
+         * PyObject_GetAttrString leaves an AttributeError SET, and the next
+         * CPython call that checks would report this absence as its own
+         * failure. The four required lookups above never hit it because they
+         * return on failure. */
+        Py_XDECREF(py_binds->pFuncSetImageSizes);
+        py_binds->pFuncSetImageSizes = NULL;
+        PyErr_Clear();
+    }
+
+    py_binds->pFuncCleanup = PyObject_GetAttrString(py_binds->pModule, "cleanup");
+    if (!py_binds->pFuncCleanup || !PyCallable_Check(py_binds->pFuncCleanup))
+    {
+        // cleanup is optional
+        Py_XDECREF(py_binds->pFuncCleanup);
+        py_binds->pFuncCleanup = NULL;
+        /* A failed PyObject_GetAttrString leaves an AttributeError SET, and an
+         * optional lookup does not return, so it has to be cleared here or the
+         * next CPython call reports this absence as its own failure. */
+        PyErr_Clear();
+    }
+
+    // Store the python binds in the plugin instance
+    plugin->python_plugin = py_binds;
+
+    log_info("Python plugin '%s' symbols loaded successfully", module_name);
+    log_info("  - init: %s", py_binds->pFuncInit ? "(PASS)" : "(FAIL)");
+    log_info("  - start_loop: %s", py_binds->pFuncStart ? "(PASS)" : "(FAIL)");
+    log_info("  - stop_loop: %s", py_binds->pFuncStop ? "(PASS)" : "(FAIL)");
+    log_info("  - cleanup: %s", py_binds->pFuncCleanup ? "(PASS)" : "(FAIL)");
+
+    return 0;
+}
+
+int native_plugin_get_symbols(plugin_instance_t *plugin)
+{
+    if (!plugin || plugin->config.path[0] == '\0')
+    {
+        return -1;
+    }
+
+    // Allocate native plugin function bundle
+    plugin_funct_bundle_t *native_bundle = calloc(1, sizeof(plugin_funct_bundle_t));
+    if (!native_bundle)
+    {
+        return -1;
+    }
+
+    /* A VPP .so must match the hash compile.sh sealed when it built
+     * that .so on this device, so a post-compile swap is refused.
+     * Scoped to build/vpp/; built-in plugins are not sealed. */
+    if (vpp_plugin_seal_required(plugin->config.path) &&
+        vpp_plugin_seal_verify(plugin->config.path) != 0)
+    {
+        free(native_bundle);
+        return -1;
+    }
+
+    // Load the shared library
+    void *handle = dlopen(plugin->config.path, RTLD_LOCAL | RTLD_NOW);
+    if (!handle)
+    {
+        const char *err = dlerror();
+        log_error("Failed to load native plugin '%s': %s", plugin->config.path,
+                  err ? err : "unknown error");
+#if defined(__CYGWIN__) || defined(_WIN32)
+        if (strstr(plugin->config.name, "ethercat") != NULL)
+        {
+            log_error("The EtherCAT plugin requires Npcap (https://npcap.com) to access "
+                      "the network interface. Please install Npcap and restart the runtime.");
+        }
+#endif
+        free(native_bundle);
+        return -1;
+    }
+
+    // Store the handle in the native bundle
+    native_bundle->handle = handle;
+
+    // Clear any existing error
+    dlerror();
+
+    // Get function pointers for required functions
+    // init function is required
+    native_bundle->init = (plugin_init_func_t)dlsym(handle, "init");
+    if (!native_bundle->init)
+    {
+        log_error("Error: 'init' function not found in native plugin '%s': %s", plugin->config.path,
+                  dlerror());
+        dlclose(handle);
+        free(native_bundle);
+        return -1;
+    }
+
+    // Optional functions - set to NULL if not found
+    native_bundle->start = (plugin_start_loop_func_t)dlsym(handle, "start_loop");
+    if (!native_bundle->start)
+    {
+        log_warn("'start_loop' function not found in native plugin '%s' (optional)",
+                 plugin->config.path);
+    }
+
+    native_bundle->stop = (plugin_stop_loop_func_t)dlsym(handle, "stop_loop");
+    if (!native_bundle->stop)
+    {
+        log_warn("'stop_loop' function not found in native plugin '%s' (optional)",
+                 plugin->config.path);
+    }
+
+    native_bundle->cycle_start = (plugin_cycle_start_func_t)dlsym(handle, "cycle_start");
+    if (!native_bundle->cycle_start)
+    {
+        log_warn("'cycle_start' function not found in native plugin '%s' (optional)",
+                 plugin->config.path);
+    }
+
+    native_bundle->cycle_end = (plugin_cycle_end_func_t)dlsym(handle, "cycle_end");
+    if (!native_bundle->cycle_end)
+    {
+        log_warn("'cycle_end' function not found in native plugin '%s' (optional)",
+                 plugin->config.path);
+    }
+
+    native_bundle->cleanup = (plugin_cleanup_func_t)dlsym(handle, "cleanup");
+    if (!native_bundle->cleanup)
+    {
+        log_warn("'cleanup' function not found in native plugin '%s' (optional)",
+                 plugin->config.path);
+    }
+
+    native_bundle->execute_command =
+        (plugin_execute_command_func_t)dlsym(handle, "execute_command");
+    if (!native_bundle->execute_command)
+    {
+        log_warn("'execute_command' function not found in native plugin '%s' (optional)",
+                 plugin->config.path);
+    }
+
+    native_bundle->get_stats = (plugin_get_stats_func_t)dlsym(handle, "get_stats");
+    // get_stats is fully optional — plugins that don't publish statistics
+    // simply don't export it. No warning.
+
+    // Optional retain store. A plugin exporting both save and load
+    // becomes a candidate; see plugin_driver_find_retain_store. No
+    // warning when absent — most plugins have no retention role.
+    native_bundle->retain_save  = (plugin_retain_save_func_t)dlsym(handle, "retain_save");
+    native_bundle->retain_load  = (plugin_retain_load_func_t)dlsym(handle, "retain_load");
+    native_bundle->retain_flush = (plugin_retain_flush_func_t)dlsym(handle, "retain_flush");
+
+    /* Optional, like the five above: NULL simply means this plugin does not
+     * understand per-table image sizes, and the run stays square for it. */
+    native_bundle->set_image_sizes =
+        (plugin_set_image_sizes_func_t)dlsym(handle, "set_image_sizes");
+
+    // Store the native bundle and handle in the plugin instance
+    plugin->native_plugin = native_bundle;
+
+    log_info("Native plugin '%s' symbols loaded successfully", plugin->config.path);
+    log_info("  - init: (PASS)");
+    log_info("  - start_loop: %s", native_bundle->start ? "(PASS)" : "(FAIL)");
+    log_info("  - stop_loop: %s", native_bundle->stop ? "(PASS)" : "(FAIL)");
+    log_info("  - cycle_start: %s", native_bundle->cycle_start ? "(PASS)" : "(FAIL)");
+    log_info("  - cycle_end: %s", native_bundle->cycle_end ? "(PASS)" : "(FAIL)");
+    log_info("  - cleanup: %s", native_bundle->cleanup ? "(PASS)" : "(FAIL)");
+    log_info("  - execute_command: %s", native_bundle->execute_command ? "(PASS)" : "(FAIL)");
+    log_info("  - get_stats: %s", native_bundle->get_stats ? "(PASS)" : "(FAIL)");
+
+    return 0;
+}
+
+// Python plugin cycle function
+void python_plugin_cycle(plugin_instance_t *plugin)
+{
+    (void)plugin; // Suppress unused parameter warning
+    // In a real implementation, you'd retrieve the python_plugin_t structure
+    // and call the cycle function
+}
+
+// Retain store
+static bool plugin_provides_retain_store(const plugin_instance_t *p)
+{
+    if (!p) return false;
+    // Disabled plugins never serve as a store: they resolve symbols but
+    // do not run, so they would accept save() and lose everything.
+    if (!p->config.enabled) return false;
+    // Save without load is worse than none; require both halves.
+    return p->native_plugin && p->native_plugin->retain_save && p->native_plugin->retain_load;
+}
+
+plugin_instance_t *plugin_driver_find_retain_store(plugin_driver_t *driver)
+{
+    if (!driver)
+        return NULL;
+
+    plugin_instance_t *chosen = NULL;
+    for (int i = 0; i < driver->plugin_count; i++)
+    {
+        plugin_instance_t *p = &driver->plugins[i];
+        if (p->degraded || !plugin_provides_retain_store(p))
+            continue;
+
+        if (!chosen)
+        {
+            chosen = p;
+            continue;
+        }
+        // Two stores would both appear to work and disagree on the next boot,
+        // which is a worse failure than refusing the second. First wins, and
+        // the rest are named so the misconfiguration is visible.
+        log_warn("Retain: plugin '%s' also provides retain storage; ignoring it — "
+                 "'%s' was found first",
+                 p->config.name, chosen->config.name);
+    }
+    return chosen;
+}
+
+int plugin_driver_retain_save(plugin_instance_t *store, const uint8_t *blob, uint16_t len)
+{
+    if (!plugin_provides_retain_store(store))
+        return -1;
+    return store->native_plugin->retain_save(blob, len);
+}
+
+int plugin_driver_retain_load(plugin_instance_t *store, const char *program_md5, uint16_t md5_len,
+                              uint8_t *out, uint16_t cap, uint16_t *out_len)
+{
+    if (out_len)
+        *out_len = 0;
+    if (!plugin_provides_retain_store(store))
+        return -1;
+    return store->native_plugin->retain_load(program_md5, md5_len, out, cap, out_len);
+}
+
+int plugin_driver_retain_flush(plugin_instance_t *store)
+{
+    // Optional third hook. A plugin without it is assumed to commit inside
+    // save(), which is where durability belongs anyway — so "nothing to do" is
+    // success, not a failure to report on every stop.
+    if (!store || !store->native_plugin || !store->native_plugin->retain_flush)
+        return 0;
+    return store->native_plugin->retain_flush();
+}
+
+void plugin_driver_cycle_start(plugin_driver_t *driver)
+{
+    if (!driver || driver->plugin_count == 0)
+    {
+        return;
+    }
+
+    for (int i = 0; i < driver->plugin_count; i++)
+    {
+        plugin_instance_t *plugin = &driver->plugins[i];
+
+        // Skip non-running plugins
+        if (!plugin->running)
+        {
+            continue;
+        }
+
+        // Only native plugins support cycle hooks (they can run in real-time)
+        if (plugin->config.type == PLUGIN_TYPE_NATIVE && plugin->native_plugin &&
+            plugin->native_plugin->cycle_start)
+        {
+            plugin->native_plugin->cycle_start();
+        }
+    }
+}
+
+// Call cycle_end for all active native plugins that have registered the hook
+// This should be called at the end of each PLC scan cycle, after PLC logic execution
+// Plugins opt-in by implementing cycle_end(); opt-out by not implementing it (NULL pointer)
+void plugin_driver_cycle_end(plugin_driver_t *driver)
+{
+    if (!driver || driver->plugin_count == 0)
+    {
+        return;
+    }
+
+    for (int i = 0; i < driver->plugin_count; i++)
+    {
+        plugin_instance_t *plugin = &driver->plugins[i];
+
+        // Skip non-running plugins
+        if (!plugin->running)
+        {
+            continue;
+        }
+
+        // Only native plugins support cycle hooks (they can run in real-time)
+        if (plugin->config.type == PLUGIN_TYPE_NATIVE && plugin->native_plugin &&
+            plugin->native_plugin->cycle_end)
+        {
+            plugin->native_plugin->cycle_end();
+        }
+    }
+}
+
+// Route a command to a specific plugin by name
+int plugin_driver_execute_command(plugin_driver_t *driver, const char *plugin_name,
+                                  const char *command_json, char *response, size_t response_size)
+{
+    if (!driver || !plugin_name || !command_json)
+    {
+        snprintf(response, response_size, "{\"error\":\"invalid arguments\"}");
+        return -1;
+    }
+
+    for (int i = 0; i < driver->plugin_count; i++)
+    {
+        plugin_instance_t *plugin = &driver->plugins[i];
+        if (strcmp(plugin->config.name, plugin_name) != 0)
+            continue;
+
+        if (plugin->config.type == PLUGIN_TYPE_NATIVE && plugin->native_plugin &&
+            plugin->native_plugin->execute_command)
+        {
+            return plugin->native_plugin->execute_command(command_json, response, response_size);
+        }
+
+        /* Plugin is present in the config but its symbols never loaded
+         * (degraded), so it cannot service commands. Tell the caller it is
+         * unavailable rather than reporting a misleading "not supported". */
+        if (plugin->degraded)
+        {
+            snprintf(response, response_size,
+                     "{\"error\":\"plugin '%s' failed to load and is unavailable. Check the "
+                     "runtime logs for the cause (e.g. a missing system dependency).\"}",
+                     plugin_name);
+            return -1;
+        }
+
+        snprintf(response, response_size,
+                 "{\"error\":\"plugin '%s' does not support execute_command\"}", plugin_name);
+        return -1;
+    }
+
+    snprintf(response, response_size, "{\"error\":\"plugin '%s' not found\"}", plugin_name);
+    return -1;
+}
+
+#define PLUGIN_STATS_SLOT_BUDGET   1024
+#define PLUGIN_STATS_TOTAL_BUDGET  8192
+
+size_t plugin_driver_append_stats_json(plugin_driver_t *driver, char *buffer, size_t buffer_size)
+{
+    if (!buffer || buffer_size == 0)
+        return 0;
+
+    size_t len = strlen(buffer);
+
+    // Detect and strip a trailing newline — we'll re-add it after splicing.
+    int had_newline = 0;
+    if (len > 0 && buffer[len - 1] == '\n')
+    {
+        had_newline   = 1;
+        buffer[--len] = '\0';
+    }
+
+    // Expect the core STATS payload to end in '}'. If it doesn't, the
+    // response is malformed and we won't risk making it worse.
+    if (len == 0 || buffer[len - 1] != '}')
+    {
+        if (had_newline && len + 1 < buffer_size)
+        {
+            buffer[len]     = '\n';
+            buffer[len + 1] = '\0';
+            len++;
+        }
+        return len;
+    }
+
+    if (!driver || driver->plugin_count == 0)
+    {
+        if (had_newline && len + 1 < buffer_size)
+        {
+            buffer[len]     = '\n';
+            buffer[len + 1] = '\0';
+            len++;
+        }
+        return len;
+    }
+
+    // Build the ,"plugin_stats":{...} section in a scratch buffer so we
+    // can commit-or-rollback atomically if it would overflow the response.
+    char scratch[PLUGIN_STATS_TOTAL_BUDGET];
+    size_t spos = 0;
+    int emitted = 0;
+
+    for (int i = 0; i < driver->plugin_count; i++)
+    {
+        plugin_instance_t *p = &driver->plugins[i];
+        if (p->config.type != PLUGIN_TYPE_NATIVE)
+            continue;
+        if (!p->native_plugin || !p->native_plugin->get_stats)
+            continue;
+
+        char slot[PLUGIN_STATS_SLOT_BUDGET];
+        slot[0] = '\0';
+        if (p->native_plugin->get_stats(slot, sizeof(slot)) != 0)
+            continue;
+
+        size_t slen = strnlen(slot, sizeof(slot));
+        if (slen < 2 || slot[0] != '{' || slot[slen - 1] != '}')
+            continue; // malformed — drop silently
+
+        int n = snprintf(scratch + spos, sizeof(scratch) - spos, "%s\"%s\":%s", emitted ? "," : "",
+                         p->config.name, slot);
+        if (n < 0 || (size_t)n >= sizeof(scratch) - spos)
+            break; // scratch full; commit what we have
+
+        spos += (size_t)n;
+        emitted = 1;
+    }
+
+    if (!emitted)
+    {
+        if (had_newline && len + 1 < buffer_size)
+        {
+            buffer[len]     = '\n';
+            buffer[len + 1] = '\0';
+            len++;
+        }
+        return len;
+    }
+
+    // Splice: overwrite the closing '}' with ,"plugin_stats":{...}} and
+    // re-append the newline if present.
+    size_t insert_pos = len - 1;
+    int n = snprintf(buffer + insert_pos, buffer_size - insert_pos, ",\"plugin_stats\":{%s}}%s",
+                     scratch, had_newline ? "\n" : "");
+    if (n < 0)
+    {
+        // snprintf failure — restore newline and bail.
+        if (had_newline && len + 1 < buffer_size)
+        {
+            buffer[len]     = '\n';
+            buffer[len + 1] = '\0';
+            len++;
+        }
+        return len;
+    }
+    if ((size_t)n >= buffer_size - insert_pos)
+    {
+        // Would overflow the response buffer; roll back by restoring the '}'
+        // and the newline.
+        buffer[insert_pos]     = '}';
+        buffer[insert_pos + 1] = '\0';
+        len                    = insert_pos + 1;
+        if (had_newline && len + 1 < buffer_size)
+        {
+            buffer[len]     = '\n';
+            buffer[len + 1] = '\0';
+            len++;
+        }
+        return len;
+    }
+
+    return insert_pos + (size_t)n;
+}
+
+// Cleanup Python plugin
+static void python_plugin_cleanup(plugin_instance_t *plugin)
+{
+    // Cleanup Python resources
+    if (plugin && plugin->python_plugin)
+    {
+        // Call cleanup function if available
+        if (plugin->python_plugin->pFuncCleanup)
+        {
+            PyObject *res = PyObject_CallFunctionObjArgs(plugin->python_plugin->pFuncCleanup, NULL);
+            if (!res)
+            {
+                PyErr_Print();
+                log_error("Python cleanup call failed for plugin: %s", plugin->config.name);
+            }
+            else
+            {
+                log_info("Plugin %s cleaned up successfully", plugin->config.name);
+                Py_DECREF(res);
+            }
+        }
+
+        // Decrement references to Python objects
+        Py_XDECREF(plugin->python_plugin->pFuncInit);
+        Py_XDECREF(plugin->python_plugin->pFuncStart);
+        Py_XDECREF(plugin->python_plugin->pFuncStop);
+        Py_XDECREF(plugin->python_plugin->pFuncCleanup);
+        Py_XDECREF(plugin->python_plugin->pFuncSetImageSizes);
+        Py_XDECREF(plugin->python_plugin->pModule);
+        Py_XDECREF(plugin->python_plugin->args_capsule);
+
+        free(plugin->python_plugin);
+        plugin->python_plugin = NULL;
+    }
+}
