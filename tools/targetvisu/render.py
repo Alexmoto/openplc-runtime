@@ -8,6 +8,26 @@ def rgb(value):
     return tuple(int(value[i:i + 2], 16) / 255 for i in (1, 3, 5))
 
 
+def bound_color(model, element, key, values):
+    value = model.bound(element, key, values)
+    if element['kind'] != 'number' or type(value) is not int:
+        return element[key]
+    return f'#{value & 0xffffff:06x}'
+
+
+def rounded_rect(ctx, x, y, w, h, radius):
+    radius = max(0, min(radius, w / 2, h / 2))
+    if not radius:
+        ctx.rectangle(x, y, w, h)
+        return
+    ctx.new_sub_path()
+    ctx.arc(x + w - radius, y + radius, radius, -math.pi / 2, 0)
+    ctx.arc(x + w - radius, y + h - radius, radius, 0, math.pi / 2)
+    ctx.arc(x + radius, y + h - radius, radius, math.pi / 2, math.pi)
+    ctx.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
+    ctx.close_path()
+
+
 def geometry(screen, width, height):
     scale = min(width / screen['width'], height / screen['height'])
     return scale, (width - screen['width'] * scale) / 2, (height - screen['height'] * scale) / 2
@@ -43,7 +63,9 @@ def draw(ctx, model, screen, values, online, width, height, pressed=None):
         x, y, w, h = (e[k] for k in ('x', 'y', 'width', 'height'))
         value = model.bound(e, 'value', values)
         active = (e['kind'] in ('indicator', 'button') and bool(value)) or e['id'] == pressed
-        fill = e['activeFill'] if active else e['fill']
+        fill = e['activeFill'] if active else bound_color(model, e, 'fill', values)
+        stroke = bound_color(model, e, 'stroke', values)
+        text_color = bound_color(model, e, 'textColor', values)
         if e['kind'] == 'line':
             direction = e.get('lineDirection', 'horizontal')
             start, end = {'horizontal': ((x, y + h / 2), (x + w, y + h / 2)),
@@ -54,12 +76,14 @@ def draw(ctx, model, screen, values, online, width, height, pressed=None):
         elif e['kind'] in ('ellipse', 'indicator'):
             ctx.save(); ctx.translate(x + w / 2, y + h / 2); ctx.scale(w / 2, h / 2)
             ctx.arc(0, 0, 1, 0, 2 * math.pi); ctx.restore()
+        elif e['kind'] == 'number':
+            rounded_rect(ctx, x, y, w, h, e.get('borderRadius', 0))
         elif e['kind'] != 'text':
             ctx.rectangle(x, y, w, h)
         if e['kind'] != 'text':
             if e['kind'] != 'line':
                 ctx.set_source_rgb(*rgb(fill)); ctx.fill_preserve()
-            ctx.set_source_rgb(*rgb(e['stroke'])); ctx.set_line_width(e['strokeWidth'])
+            ctx.set_source_rgb(*rgb(stroke)); ctx.set_line_width(e['strokeWidth'])
             if e['strokeWidth']:
                 ctx.stroke()
             else:
@@ -79,7 +103,7 @@ def draw(ctx, model, screen, values, online, width, height, pressed=None):
                 text = str(value)
         if text and e['kind'] != 'line':
             ctx.rectangle(x, y, w, h); ctx.clip()
-            ctx.set_source_rgb(*rgb(e['textColor']))
+            ctx.set_source_rgb(*rgb(text_color))
             # Pango provides UTF-8/Cyrillic layout and respects the element clip.
             from gi.repository import Pango, PangoCairo
             layout = PangoCairo.create_layout(ctx)
