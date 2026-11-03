@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Cairo renderer; logical coordinates match the Editor SVG preview."""
 import math
+from .graphics import draw_graphic
 
 
 def rgb(value):
@@ -33,6 +34,9 @@ def draw(ctx, model, screen, values, online, width, height, pressed=None):
     ctx.paint()
     for e in screen['elements']:
         if not model.visible(e, values):
+            continue
+        if e['kind'] == 'graphic':
+            draw_graphic(ctx, e)
             continue
         ctx.save()
         ctx.new_path()

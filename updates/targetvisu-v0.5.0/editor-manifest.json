@@ -1,0 +1,53 @@
+{
+  "files": {
+    "src/backend/shared/compile/steps/__tests__/generate-targetvisu.test.ts": {
+      "before": [
+        "7c8110a5a0e92a50b7ccc854fe2a64ed5ee2f7b623c955b5135dc7efc8ac3eb2"
+      ],
+      "after": "b777d490c4d25196f126ca530b4702a3dd65cd393c233793f21372a69c28b998"
+    },
+    "src/frontend/components/_features/[workspace]/editor/targetvisu/__tests__/designer.test.tsx": {
+      "before": [
+        "f9442573a276d89d7111bea64b5e7df02690aa3047c5ffcfb29778acc1349a20"
+      ],
+      "after": "d5c50b2ae6e2cd7ed3f2ee63915912784a549fa04f34870613b07ab8e57a9b46"
+    },
+    "src/frontend/components/_features/[workspace]/editor/targetvisu/designer.tsx": {
+      "before": [
+        "a3cbfc289dfb69f6250bdeeb239d107516d41ba3106428829eb73a9f2b55ac1e"
+      ],
+      "after": "9d1c3949c5c0adc2769ae3d8394b55046505723b3baf85feab8bf44dc5107c76"
+    },
+    "src/middleware/shared/targetvisu/model.ts": {
+      "before": [
+        "778eefa56aba4b044e08555e2023e7a0dbd8ee480f95b43357b6c573e879fbac"
+      ],
+      "after": "8267aa1ed259afef4730158bec48092aa73caf80e7cf3e4d334b7c4767bb127b"
+    },
+    "src/frontend/components/_features/[workspace]/editor/targetvisu/__tests__/graphic-properties.test.tsx": {
+      "before": [
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      ],
+      "after": "bf314b3b585e0731a19771dae6dc35b65b1240f400bb477b79786c61a3509bd5"
+    },
+    "src/frontend/components/_features/[workspace]/editor/targetvisu/graphic-properties.tsx": {
+      "before": [
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      ],
+      "after": "28af6cddecc57e6d77612491270b4cd841c984de1b2dfdf384257b6819422abc"
+    },
+    "src/middleware/shared/targetvisu/__tests__/graphics.test.ts": {
+      "before": [
+        null
+      ],
+      "after": "545a1811d46db947c273de51a76243d4768070fea296a9267e39cae721688f24"
+    },
+    "src/middleware/shared/targetvisu/graphics.ts": {
+      "before": [
+        null
+      ],
+      "after": "50d9c969c23e9c0c86d39f44aacabac423399492de3a645254afde8300c32ebf"
+    }
+  },
+  "dependencies": {}
+}

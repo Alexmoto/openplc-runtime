@@ -5,10 +5,11 @@ import math
 import re
 import struct
 from pathlib import Path
+from .graphics import validate_graphic
 
 FORMATS = dict(BOOL='?', SINT='b', USINT='B', BYTE='B', INT='h', UINT='H', WORD='H',
                DINT='i', UDINT='I', DWORD='I', LINT='q', ULINT='Q', LWORD='Q', REAL='f', LREAL='d')
-KINDS = {'rectangle', 'ellipse', 'line', 'text', 'indicator', 'button', 'number'}
+KINDS = {'rectangle', 'ellipse', 'line', 'text', 'indicator', 'button', 'number', 'graphic'}
 ACTIONS = {'none', 'set', 'toggle', 'momentary', 'write', 'navigate'}
 
 
@@ -58,6 +59,8 @@ def document(raw):
         for e in elements:
             unique(e)
             require(e.get('kind') in KINDS, 'Unknown element kind')
+            if e.get('kind') == 'graphic':
+                validate_graphic(e.get('graphic'))
             require(isinstance(e.get('name'), str) and 1 <= len(e['name']) <= 80, 'Invalid name')
             for key in ('fill', 'activeFill', 'stroke', 'textColor'):
                 color(e, key)
@@ -78,6 +81,8 @@ def document(raw):
                 require(isinstance(e['bindings'].get(key), str) and len(e['bindings'][key]) <= 256, 'Invalid binding')
             a = e.get('action', {})
             require(isinstance(a, dict), 'Invalid action object')
+            if e['kind'] == 'graphic':
+                require(a.get('kind') == 'none', 'Graphic view is display-only')
             require(a.get('kind') in ACTIONS and isinstance(a.get('target'), str) and len(a['target']) <= 256, 'Invalid action')
             require(type(a.get('value')) in (bool, int, float, str), 'Invalid action value')
             if type(a['value']) in (int, float):
