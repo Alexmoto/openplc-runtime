@@ -53,8 +53,9 @@ python3 updates/targetvisu-number-input-v1.0.0/install_update.py --runtime /root
 python3 updates/targetvisu-number-input-v1.0.0/install_update.py --runtime /root/openplc-runtime
 ```
 
-Скрипт резервирует прежние Python-файлы, обновляет `model.py` и `viewer.py`
-и добавляет `keypad.py`. Если папка Git и рабочая папка Runtime совпадают, переключение
+Скрипт резервирует прежние Python-файлы, обновляет `model.py`, `render.py`,
+`graphics.py` и `viewer.py` и добавляет `keypad.py`. Это единый накопительный
+пакет предыдущих функций TargetVisu. Если папка Git и рабочая папка Runtime совпадают, переключение
 ветки изменяет код ещё до запуска установщика — в этом случае используйте резервную
 копию Git-коммита для отката.
 
