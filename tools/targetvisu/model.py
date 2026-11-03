@@ -75,6 +75,11 @@ def document(raw):
                 number(e.get(key), 8, 8192, key)
             require(e['x'] + e['width'] <= screen['width'] and e['y'] + e['height'] <= screen['height'], 'Element exceeds screen')
             number(e.get('strokeWidth'), 0, 20, 'strokeWidth')
+            for key in ('fillTransparent', 'strokeTransparent'):
+                flag = e.get(key, False)
+                require(type(flag) is bool, f'Invalid {key}: expected BOOL')
+                require(not flag or e['kind'] in ('button', 'number'),
+                        f'{key} is supported only for Button and Number')
             number(e.get('borderRadius', 0), 0, 100, 'borderRadius')
             number(e.get('fontSize'), 6, 200, 'fontSize', True)
             number(e.get('decimals'), 0, 6, 'decimals', True)

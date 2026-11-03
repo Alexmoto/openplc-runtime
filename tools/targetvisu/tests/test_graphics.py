@@ -127,6 +127,42 @@ class GraphicTests(unittest.TestCase):
             self.assertGreater(blue[0], 190)  # transparent PNG on the right keeps blue fill
             _surface.cache_clear()
 
+    def test_transparent_button_keeps_background_visible_and_border_optional(self):
+        from targetvisu.render import draw
+        original = fixture()
+        doc = copy.deepcopy(original.doc)
+        screen = doc['screens'][0]
+        e = next(e for e in screen['elements'] if e['kind'] == 'button')
+        screen['elements'] = [e]
+        screen['background'] = '#00ff00'
+        e['text'] = ''  # Avoid native Pango dependency when testing Cairo colors.
+        e['strokeWidth'] = 8
+        e['fillTransparent'] = True
+        e['strokeTransparent'] = True
+        model = Model(doc, dict(version=2, md5=original.md5, leaves=list(original.leaves.values())))
+        try:
+            import cairo
+        except ImportError:
+            try: import cairocffi as cairo
+            except ImportError: self.skipTest('Cairo unavailable')
+        with patch.dict(sys.modules, {'cairo': cairo}):
+            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, screen['width'], screen['height'])
+            ctx = cairo.Context(surface)
+            draw(ctx, model, screen, {}, True, screen['width'], screen['height'])
+            surface.flush()
+            x, y = e['x'] + 1, e['y'] + e['height'] // 2
+            def pixel(image, x, y):
+                data = image.get_data()
+                pos = y * image.get_stride() + x * 4
+                return bytes(data[pos:pos + 4])
+            self.assertEqual(pixel(surface, x, y), b'\\x00\\xff\\x00\\xff')
+            self.assertEqual(pixel(surface, e['x'] + e['width']//2, y), b'\\x00\\xff\\x00\\xff')
+            e['strokeTransparent'] = False
+            surface2 = cairo.ImageSurface(cairo.FORMAT_ARGB32, screen['width'], screen['height'])
+            draw(cairo.Context(surface2), model, screen, {}, True, screen['width'], screen['height'])
+            surface2.flush()
+            self.assertNotEqual(pixel(surface2, x, y), b'\\x00\\xff\\x00\\xff')
+
     def test_placement(self):
         self.assertEqual(placement(200,100,100,100,'contain'),(0,25,0.5,0.5))
         self.assertEqual(placement(200,100,100,100,'cover'),(-50,0,1,1))
