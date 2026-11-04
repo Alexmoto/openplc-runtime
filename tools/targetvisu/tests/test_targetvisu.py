@@ -133,6 +133,37 @@ class ModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Number mode'):
             Model(doc, debug_map)
 
+    def test_12_color_indicator_accepts_integer_but_preserves_classic_bool(self):
+        original = fixture()
+        doc = copy.deepcopy(original.doc)
+        data = load_json(ROOT / 'example.debug-map.json')
+        indicator = next(e for e in doc['screens'][0]['elements'] if e['kind'] == 'indicator')
+        # Legacy Indicator without style remains BOOL-based.
+        Model(doc, data)
+        indicator['indicatorStyle'] = 'lamp12'
+        indicator['bindings']['value'] = 'Pump1.Setpoint'
+        with self.assertRaisesRegex(ValueError, '32-bit or smaller integer'):
+            Model(doc, data)
+        leaf = next(leaf for leaf in data['leaves'] if leaf['path'] == 'Pump1.Setpoint')
+        leaf.update(type='INT', size=2)
+        Model(doc, data)
+        indicator['bindings']['value'] = ''
+        with self.assertRaisesRegex(ValueError, 'requires a PLC value variable'):
+            Model(doc, data)
+        indicator['bindings']['value'] = 'Pump1.Setpoint'
+        indicator['action'] = dict(kind='toggle', target='Pump1.StartRequest', value=True)
+        with self.assertRaisesRegex(ValueError, 'display-only'):
+            Model(doc, data)
+        indicator['action'] = dict(kind='none', target='', value=True)
+        indicator['indicatorStyle'] = 'unknown'
+        with self.assertRaisesRegex(ValueError, 'Invalid Indicator style'):
+            Model(doc, data)
+        indicator['indicatorStyle'] = 'classic'
+        indicator['bindings']['value'] = 'Pump1.Running'
+        Model(doc, data)
+        indicator.pop('indicatorStyle')
+        Model(doc, data)
+
     def test_unknown_symbol_no_address_guess(self):
         m = fixture()
         doc = copy.deepcopy(m.doc)
