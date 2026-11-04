@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Cairo renderer; logical coordinates match the Editor SVG preview."""
 import math
-from .graphics import draw_graphic
+from .graphics import draw_graphic, _surface
+from .lamp_palette import SPRITE_URL, CELL_SIZE, lamp_state
 
 
 def rgb(value):
@@ -26,6 +27,28 @@ def rounded_rect(ctx, x, y, w, h, radius):
     ctx.arc(x + radius, y + h - radius, radius, math.pi / 2, math.pi)
     ctx.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
     ctx.close_path()
+
+
+def draw_indicator_lamp(ctx, element, state):
+    """Paint one 33x33 lamp cell, preserving its round aspect and transparent rim."""
+    state = lamp_state(state)
+    if not state:
+        return
+    sprite = _surface(SPRITE_URL)
+    if sprite is None:
+        return
+    x, y, w, h = (element[k] for k in ('x', 'y', 'width', 'height'))
+    side = min(w, h)
+    x += (w - side) / 2
+    y += (h - side) / 2
+    ctx.save()
+    ctx.rectangle(x, y, side, side)
+    ctx.clip()
+    ctx.translate(x, y)
+    ctx.scale(side / CELL_SIZE, side / CELL_SIZE)
+    ctx.set_source_surface(sprite, -CELL_SIZE * (state - 1), 0)
+    ctx.paint()
+    ctx.restore()
 
 
 def geometry(screen, width, height):
@@ -64,6 +87,9 @@ def draw(ctx, model, screen, values, online, width, height, pressed=None):
             continue
         if e['kind'] == 'graphic':
             draw_graphic(ctx, e, model.bound(e, 'value', values), bool(e['bindings'].get('value')))
+            continue
+        if e['kind'] == 'indicator' and e.get('indicatorStyle') == 'lamp12':
+            draw_indicator_lamp(ctx, e, model.bound(e, 'value', values))
             continue
         ctx.save()
         ctx.new_path()
