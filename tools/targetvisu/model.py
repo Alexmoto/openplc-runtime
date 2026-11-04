@@ -11,6 +11,7 @@ FORMATS = dict(BOOL='?', SINT='b', USINT='B', BYTE='B', INT='h', UINT='H', WORD=
                DINT='i', UDINT='I', DWORD='I', LINT='q', ULINT='Q', LWORD='Q', REAL='f', LREAL='d')
 KINDS = {'rectangle', 'ellipse', 'line', 'text', 'indicator', 'button', 'number', 'graphic'}
 ACTIONS = {'none', 'set', 'toggle', 'momentary', 'write', 'navigate'}
+LAMP_SELECTOR_TYPES = {'SINT', 'USINT', 'BYTE', 'INT', 'UINT', 'WORD', 'DINT', 'UDINT', 'DWORD'}
 
 
 def require(condition, message):
@@ -90,6 +91,9 @@ def document(raw):
             number(e.get('maximum'), e['minimum'], float('inf'), 'maximum')
             require(isinstance(e.get('text'), str) and len(e['text']) <= 1024, 'Invalid text')
             require(e.get('lineDirection', 'horizontal') in {'horizontal', 'vertical', 'diagonal-down', 'diagonal-up'}, 'Invalid line direction')
+            style = e.get('indicatorStyle')
+            require(style is None or (e['kind'] == 'indicator' and style in ('classic', 'lamp12')),
+                    'Invalid Indicator style')
             require(isinstance(e.get('bindings'), dict), 'Missing bindings')
             for key in ('value', 'visible', 'enabled'):
                 require(isinstance(e['bindings'].get(key), str) and len(e['bindings'][key]) <= 256, 'Invalid binding')
@@ -101,6 +105,9 @@ def document(raw):
             require(isinstance(a, dict), 'Invalid action object')
             if e['kind'] == 'graphic':
                 require(a.get('kind') == 'none', 'Graphic view is display-only')
+            if style == 'lamp12':
+                require(e['bindings']['value'], '12-color lamp requires a PLC value variable')
+                require(a.get('kind') == 'none', '12-color lamp is display-only')
             require(a.get('kind') in ACTIONS and isinstance(a.get('target'), str) and len(a['target']) <= 256, 'Invalid action')
             if mode == 'input-output':
                 require(a['kind'] == 'write' and e['bindings']['value'] and
@@ -148,8 +155,11 @@ class Model:
             for key, path in e['bindings'].items():
                 if path:
                     leaf = self.leaf(path)
-                    if key in ('visible', 'enabled') or (key == 'value' and e['kind'] == 'indicator'):
+                    if key in ('visible', 'enabled') or (key == 'value' and e['kind'] == 'indicator' and e.get('indicatorStyle') != 'lamp12'):
                         require(leaf['type'] == 'BOOL', f'{path} must be BOOL')
+                    if key == 'value' and e['kind'] == 'indicator' and e.get('indicatorStyle') == 'lamp12':
+                        require(leaf['type'] in LAMP_SELECTOR_TYPES,
+                                f'{path}: 12-color lamp requires 32-bit or smaller integer PLC variable')
                     if key == 'value' and e['kind'] == 'number':
                         require(leaf['type'] in FORMATS and leaf['type'] != 'BOOL', f'{path} must be numeric')
                     if key == 'value' and e['kind'] == 'graphic':
