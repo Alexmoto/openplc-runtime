@@ -65,8 +65,16 @@ PLC variables using its existing interface.
 - Incoming values are JSON scalars (`true`, `false`, `0`, `1`, `21.5`) or fields
   selected by JSON Pointer (`/a/0/value`, `~1` for slash and `~0` for tilde).
   BOOL accepts only booleans or integer 0/1. Strings such as `"ON"` are rejected.
-- Publications are JSON scalars, periodically every 100..60000 ms (default 500),
-  whether or not the value changed. QoS and retain are per row.
+- Publications are JSON scalars. Each Publish binding has a mode:
+  `interval` (periodic, 100..60000 ms per row) or `on-change` (publish only
+  when the PLC scalar value changes). An on-change publisher sends its current
+  value once on first connection and again after reconnecting; no periodic
+  heartbeat is sent in this mode. PLC values are sampled every ~50 ms, so
+  shorter changes can be missed. QoS and retain remain per row.
+- Older projects without `publishMode` or `publishIntervalMs` keep their
+  previous periodic behaviour with the global `intervalMs` (default 500 ms).
+  Successful Paho `publish()` only confirms queueing for delivery; QoS 0
+  does not guarantee broker receipt. A failed send or PLC read is retried.
 - Writes are ordinary soft writes through the Runtime scan-boundary journal,
   never forces. Do not assign the subscribed variable in PLC code if it should
   keep the received value. A forced variable still respects the Runtime force.

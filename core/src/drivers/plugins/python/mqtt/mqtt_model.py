@@ -45,6 +45,14 @@ def validate(config):
         pointer = b.get('jsonPointer')
         if not isinstance(pointer, str) or len(pointer) > 512 or (pointer and (not pointer.startswith('/') or re.search('~(?![01])', pointer))):
             raise ValueError('MQTT: invalid JSON pointer')
+        mode = b.get('publishMode', 'interval')
+        if b['direction'] == 'publish':
+            if mode not in ('interval', 'on-change'):
+                raise ValueError('MQTT: invalid publish mode')
+            if 'publishIntervalMs' in b and not integer(b['publishIntervalMs'], 100, 60000):
+                raise ValueError('MQTT: invalid publish interval')
+        elif 'publishMode' in b or 'publishIntervalMs' in b:
+            raise ValueError('MQTT: publish options require publish direction')
         if b['direction'] == 'subscribe':
             address = (b['arr'], b['elem'])
             if address in inputs:

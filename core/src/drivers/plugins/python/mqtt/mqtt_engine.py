@@ -19,6 +19,11 @@ class MqttEngine:
         self.worker = None
         self.last_warning = {}
         self.subscriptions = {}
+        # Successful publications only: rejected/failed sends must be retried.
+        # Reset on reconnect so an on-change publisher sends its current value.
+        self.last_published = {}
+        self.last_published_at = {}
+        self.connection_generation = 0
         for binding in config['bindings']:
             if binding['direction'] == 'subscribe':
                 self.subscriptions.setdefault(binding['topic'], []).append(binding)
@@ -38,7 +43,11 @@ class MqttEngine:
         if reason != 0:
             self.log('warn', 'MQTT: broker rejected connection')
             return
-        self.connected.set()
+        with self.lock:
+            self.connection_generation += 1
+            self.last_published.clear()
+            self.last_published_at.clear()
+            self.connected.set()
         if self.subscriptions:
             topics = [(topic, max(b['qos'] for b in bindings)) for topic, bindings in self.subscriptions.items()]
             result, _ = client.subscribe(topics)
@@ -54,7 +63,11 @@ class MqttEngine:
             self.log('warn', 'MQTT: broker denied one or more subscriptions')
 
     def on_disconnect(self, client, userdata, flags, reason, properties):
-        self.connected.clear()
+        with self.lock:
+            self.connected.clear()
+            self.connection_generation += 1
+            self.last_published.clear()
+            self.last_published_at.clear()
         self.log('info', 'MQTT: disconnected; keeping last PLC values')
 
     def on_message(self, client, userdata, message):
@@ -80,19 +93,45 @@ class MqttEngine:
                     self.pending.setdefault(key, (b, raw))
         if not publish or not self.connected.is_set():
             return
+        now = time.monotonic()
         for b in self.config['bindings']:
             if b['direction'] != 'publish':
+                continue
+            key = b['id']
+            mode = b.get('publishMode', 'interval')
+            with self.lock:
+                if not self.connected.is_set():
+                    return
+                generation = self.connection_generation
+                previous = self.last_published.get(key)
+                last_at = self.last_published_at.get(key)
+            # Preserve old projects: no per-binding interval means the
+            # existing global intervalMs. In on-change mode, poll every 50 ms.
+            interval = b.get('publishIntervalMs', self.config['intervalMs']) / 1000
+            if mode == 'interval' and last_at is not None and now - last_at < interval:
                 continue
             try:
                 raw = self.read(b)
                 if raw is None:
+                    self.warn(key, f'MQTT: PLC read unavailable for binding {key}')
                     continue
                 payload = encode_message(raw, b)
+                if mode == 'on-change' and previous == payload:
+                    continue
+                if not self.connected.is_set():
+                    return
                 result = self.client.publish(b['topic'], payload, qos=b['qos'], retain=b['retain'])
                 if result.rc != 0:
-                    self.warn(b['id'], f"MQTT: publish unavailable for binding {b['id']}")
+                    self.warn(key, f'MQTT: publish unavailable for binding {key}')
+                    continue
+                # A successful Paho return means queued for sending, not
+                # broker acknowledgment (especially at QoS 0).
+                with self.lock:
+                    if self.connected.is_set() and self.connection_generation == generation:
+                        self.last_published[key] = payload
+                        self.last_published_at[key] = now
             except (ValueError, TypeError, OverflowError):
-                self.warn(b['id'], f"MQTT: invalid PLC value for binding {b['id']}")
+                self.warn(key, f'MQTT: invalid PLC value for binding {key}')
 
     def start(self):
         if self.worker is not None:
@@ -101,15 +140,11 @@ class MqttEngine:
         self.client.connect_async(self.config['host'], self.config['port'], self.config['keepalive'])
         self.client.loop_start()
         def run():
-            due = 0.0
             while not self.stop_event.wait(0.05):
-                now = time.monotonic()
                 try:
-                    self.tick(now >= due)
+                    self.tick()
                 except Exception:
                     self.warn('worker', 'MQTT: exchange failed; retrying')
-                if now >= due:
-                    due = now + self.config['intervalMs'] / 1000
         self.worker = threading.Thread(target=run, name='mqtt-plc', daemon=True)
         self.worker.start()
 
@@ -120,6 +155,9 @@ class MqttEngine:
             self.worker = None
         self.client.disconnect()
         self.client.loop_stop()
-        self.connected.clear()
         with self.lock:
+            self.connected.clear()
+            self.connection_generation += 1
+            self.last_published.clear()
+            self.last_published_at.clear()
             self.pending.clear()

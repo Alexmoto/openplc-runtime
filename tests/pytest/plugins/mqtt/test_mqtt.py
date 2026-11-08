@@ -139,3 +139,99 @@ def test_mqtt_plugin_module_name_is_unique():
     assert mqtt_module == 'mqtt_plugin'
     assert mqtt_module != opc_module
     assert (root / mqtt_entry.split(',')[1]).is_file()
+
+
+def test_publish_options_are_optional_for_legacy_projects():
+    validate(config([binding(id='out', topic='plc/out', direction='publish')]))
+    validate(config([binding(id='out', topic='plc/out', direction='publish',
+                             publishMode='on-change')]))
+    validate(config([binding(id='out', topic='plc/out', direction='publish',
+                             publishMode='interval', publishIntervalMs=5000)]))
+    for changes in ({'publishMode': 'once'}, {'publishIntervalMs': 50},
+                    {'publishIntervalMs': True}, {'publishIntervalMs': 60001}):
+        with pytest.raises(ValueError):
+            validate(config([binding(id='out', topic='plc/out', direction='publish', **changes)]))
+    with pytest.raises(ValueError):
+        validate(config([binding(publishMode='on-change')]))
+
+
+def test_publish_on_change_sends_initial_change_and_reconnect_without_duplicates():
+    client = Client()
+    plc = [struct.pack('=f', 45.0)]
+    b = binding(id='out', topic='cmnd/boiler/set', direction='publish',
+                publishMode='on-change')
+    engine = MqttEngine(config([b]), client, lambda _: plc[0], lambda *a: True, lambda *a: None)
+    engine.on_connect(client, None, None, 0, None)
+    engine.tick()
+    engine.tick()
+    assert [x[0][1] for x in client.published] == ['45.0']
+    plc[0] = struct.pack('=f', 46.0)
+    engine.tick()
+    engine.tick()
+    assert [x[0][1] for x in client.published] == ['45.0', '46.0']
+    engine.on_disconnect(client, None, None, 1, None)
+    engine.tick()
+    assert len(client.published) == 2
+    engine.on_connect(client, None, None, 0, None)
+    engine.tick()
+    engine.tick()
+    assert [x[0][1] for x in client.published] == ['45.0', '46.0', '46.0']
+
+
+def test_publish_independent_intervals_and_legacy_fallback(monkeypatch):
+    import mqtt_engine
+    clock = [0.0]
+    monkeypatch.setattr(mqtt_engine.time, 'monotonic', lambda: clock[0])
+    bindings = [
+        binding(id='fast', topic='plc/fast', direction='publish',
+                publishMode='interval', publishIntervalMs=200),
+        binding(id='slow', topic='plc/slow', direction='publish',
+                publishMode='interval', publishIntervalMs=500),
+        binding(id='legacy', topic='plc/legacy', direction='publish'),
+    ]
+    client = Client()
+    engine = MqttEngine(config(bindings), client, lambda _: struct.pack('=f', 12.0),
+                        lambda *a: True, lambda *a: None)
+    engine.on_connect(client, None, None, 0, None)
+    def counts():
+        return {topic: sum(item[0][0] == topic for item in client.published)
+                for topic in ('plc/fast', 'plc/slow', 'plc/legacy')}
+    engine.tick()
+    assert counts() == {'plc/fast': 1, 'plc/slow': 1, 'plc/legacy': 1}
+    clock[0] = .11
+    engine.tick()
+    assert counts() == {'plc/fast': 1, 'plc/slow': 1, 'plc/legacy': 2}
+    clock[0] = .21
+    engine.tick()
+    assert counts() == {'plc/fast': 2, 'plc/slow': 1, 'plc/legacy': 3}
+    clock[0] = .51
+    engine.tick()
+    assert counts() == {'plc/fast': 3, 'plc/slow': 2, 'plc/legacy': 4}
+
+
+def test_on_change_retry_after_failed_publish_and_unavailable_read():
+    class FailingClient(Client):
+        def __init__(self):
+            super().__init__()
+            self.fail = True
+        def publish(self, *args, **kwargs):
+            self.published.append((args, kwargs))
+            return SimpleNamespace(rc=1 if self.fail else 0)
+
+    client = FailingClient()
+    plc = [None]
+    logs = []
+    b = binding(id='out', topic='plc/out', direction='publish', publishMode='on-change')
+    engine = MqttEngine(config([b]), client, lambda _: plc[0],
+                        lambda *a: True, lambda *a: logs.append(a))
+    engine.on_connect(client, None, None, 0, None)
+    engine.tick()
+    assert len(client.published) == 0
+    assert any('PLC read unavailable' in m for _, m in logs)
+    plc[0] = struct.pack('=f', 55.0)
+    engine.tick()
+    assert len(client.published) == 1
+    client.fail = False
+    engine.tick()
+    engine.tick()
+    assert len(client.published) == 2
