@@ -67,6 +67,62 @@ def validate(config):
     return config
 
 
+
+def validate_bundle(data):
+    """Return independent v1 connection configurations from v1 or v2 uploads.
+
+    v2 is one PLC program/debug-map with 1..8 named MQTT connections. A
+    subscription address has one producer across *all* connections.
+    """
+    if not isinstance(data, dict):
+        raise ValueError('MQTT: invalid configuration')
+    if data.get('version') == 1:
+        return [('Legacy MQTT', validate(data))]
+    if data.get('version') != 2 or data.get('enabled') is not True:
+        raise ValueError('MQTT: invalid bundle version')
+    md5 = data.get('programMd5')
+    if not isinstance(md5, str) or not re.fullmatch('[a-f0-9]{32}', md5):
+        raise ValueError('MQTT: invalid program hash')
+    connections = data.get('connections')
+    if not isinstance(connections, list) or not 1 <= len(connections) <= 8:
+        raise ValueError('MQTT: expected 1..8 connections')
+    names, inputs, client_ids = set(), set(), set()
+    total_bindings = 0
+    result = []
+    for item in connections:
+        if not isinstance(item, dict):
+            raise ValueError('MQTT: invalid connection')
+        name = item.get('name')
+        if not isinstance(name, str) or not name.strip() or len(name) > 100 or '\0' in name:
+            raise ValueError('MQTT: invalid connection name')
+        if name.casefold() in names:
+            raise ValueError('MQTT: duplicate connection name')
+        names.add(name.casefold())
+        # Inherit only the program identity from the v2 envelope.
+        if item.get('version', 1) != 1 or item.get('enabled') is not True:
+            raise ValueError('MQTT: disabled/invalid connection')
+        if 'programMd5' in item and item['programMd5'] != md5:
+            raise ValueError('MQTT: connection hash mismatch')
+        validated = validate({**item, 'version': 1, 'programMd5': md5})
+        total_bindings += len(validated['bindings'])
+        if total_bindings > 256:
+            raise ValueError('MQTT: maximum 256 bindings across connections')
+        for binding in validated['bindings']:
+            if binding['direction'] != 'subscribe':
+                continue
+            address = (binding['arr'], binding['elem'])
+            if address in inputs:
+                raise ValueError('MQTT: multiple subscriptions write one PLC variable')
+            inputs.add(address)
+        if validated['clientId']:
+            identity = (validated['host'].casefold(), validated['port'], validated['clientId'])
+            if identity in client_ids:
+                raise ValueError('MQTT: duplicate client ID on the same broker')
+            client_ids.add(identity)
+        result.append((name, validated))
+    return result
+
+
 def encode(value, datatype):
     fmt = FORMATS[datatype]
     if datatype == 'BOOL':

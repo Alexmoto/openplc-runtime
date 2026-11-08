@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'core/src/drivers/plugins/python/mqtt'))
-from mqtt_model import decode_message, encode_message, validate
+from mqtt_model import decode_message, encode_message, validate, validate_bundle
 from mqtt_engine import MqttEngine
 
 
@@ -235,3 +235,39 @@ def test_on_change_retry_after_failed_publish_and_unavailable_read():
     engine.tick()
     engine.tick()
     assert len(client.published) == 2
+
+
+def test_multi_broker_bundle_accepts_independent_publishers_and_legacy():
+    legacy = config()
+    assert len(validate_bundle(legacy)) == 1
+    left = config([binding(id='a', variable='A', arr=1, elem=0, topic='a/temp')])
+    right = config([binding(id='b', variable='B', arr=1, elem=1, topic='b/temp')])
+    right.update(host='broker-b', clientId='b-client')
+    bundle = dict(version=2, enabled=True, programMd5='a'*32, connections=[
+        {**left, 'name': 'Boiler'},
+        {**right, 'name': 'Workshop'},
+    ])
+    connections = validate_bundle(bundle)
+    assert [name for name, _ in connections] == ['Boiler', 'Workshop']
+    assert connections[0][1]['host'] == 'localhost'
+    assert connections[1][1]['host'] == 'broker-b'
+
+
+def test_multi_broker_bundle_rejects_conflicts_and_limits():
+    left = config([binding(id='a', arr=1, elem=0)])
+    right = config([binding(id='b', arr=1, elem=1)])
+    envelope = dict(version=2, enabled=True, programMd5='a'*32, connections=[
+        {**left, 'name': 'Boiler'}, {**right, 'name': 'Workshop'},
+    ])
+    validate_bundle(envelope)
+    cases = [
+        {**envelope, 'connections': []},
+        {**envelope, 'connections': [{**left, 'name': 'X'}] * 9},
+        {**envelope, 'connections': [{**left, 'name': 'X'}, {**right, 'name': 'x'}]},
+        {**envelope, 'connections': [{**left, 'name': 'X'}, {**right, 'name': 'Y', 'bindings': [binding(id='b', arr=1, elem=0)]}]},
+        {**envelope, 'connections': [{**left, 'name': 'X', 'clientId': 'same'}, {**right, 'name': 'Y', 'clientId': 'same'}]},
+        {**envelope, 'connections': [{**left, 'name': 'X'}, {**right, 'name': 'Y', 'programMd5': 'b'*32}]},
+    ]
+    for case in cases:
+        with pytest.raises(ValueError):
+            validate_bundle(case)

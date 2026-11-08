@@ -33,7 +33,19 @@ again omits the config and disables the plugin.
 
 ## Editor
 
-Open **MQTT** in the project tree. Enable it, enter broker host/port (1883 for
+In **Remote Devices**, create one or more **MQTT** devices, each with its own
+broker, client ID, credentials and mappings. Up to eight independent MQTT
+connections per PLC program are supported (256 total bindings); each starts
+an independent Paho MQTT client and reconnects independently.
+
+Existing projects with the older project-scoped **MQTT (legacy)** configuration
+continue working and may coexist with named devices. A compiled upload with
+only the legacy connection keeps the v1 JSON format; multiple/new devices use
+the v2 envelope (`version: 2, enabled: true, programMd5, connections: [...]`).
+Two subscriptions must not target the same PLC variable, even across brokers.
+An explicit MQTT client ID may not be reused for the same host and port.
+
+Each connection can be enabled separately. Enter broker host/port (1883 for
 plain TCP, usually 8883 with TLS), optional client ID and credentials. TLS verifies
 both the certificate chain and hostname; an optional CA path refers to a file
 on the Runtime machine. Empty CA path uses system trust. Each controller needs
@@ -59,7 +71,8 @@ PLC variables using its existing interface.
 ## Behaviour and limits
 
 - MQTT 3.1.1, TCP/TLS, username/password, QoS 0/1/2 and retained publication.
-- Exact, case-sensitive topics only (no `+`/`#`); maximum 256 bindings.
+- Exact, case-sensitive topics only (no `+`/`#`); maximum 256 bindings total
+  across up to 8 connections.
 - BOOL and numeric IEC scalar types, including signed/unsigned 64-bit integers,
   REAL and LREAL. STRING, arrays, structures and binary payloads are not yet supported.
 - Incoming values are JSON scalars (`true`, `false`, `0`, `1`, `21.5`) or fields
