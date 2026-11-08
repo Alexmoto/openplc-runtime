@@ -114,8 +114,10 @@ def start_loop():
     started = []
     try:
         for engine in _engines:
-            engine.start()
+            # Include the current engine in rollback even if its start()
+            # partially opened the network loop before raising.
             started.append(engine)
+            engine.start()
         return True
     except Exception as exc:
         for engine in reversed(started):
