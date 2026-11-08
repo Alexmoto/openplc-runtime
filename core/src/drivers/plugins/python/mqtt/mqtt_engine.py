@@ -1,6 +1,6 @@
-import math
 # SPDX-License-Identifier: GPL-3.0-only
 """Bounded latest-value MQTT exchange, independent from PLC scan timing."""
+import math
 import threading
 import time
 try:

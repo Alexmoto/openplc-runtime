@@ -201,7 +201,7 @@ def test_publish_independent_intervals_and_legacy_fallback(monkeypatch):
     clock[0] = .11
     engine.tick()
     assert counts() == {'plc/fast': 1, 'plc/slow': 1, 'plc/legacy': 2}
-    clock[0] = .22
+    clock[0] = .21
     engine.tick()
     assert counts() == {'plc/fast': 2, 'plc/slow': 1, 'plc/legacy': 3}
     clock[0] = .51
