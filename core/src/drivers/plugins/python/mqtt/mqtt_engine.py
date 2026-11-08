@@ -1,3 +1,4 @@
+import math
 # SPDX-License-Identifier: GPL-3.0-only
 """Bounded latest-value MQTT exchange, independent from PLC scan timing."""
 import threading
@@ -108,7 +109,7 @@ class MqttEngine:
             # Preserve old projects: no per-binding interval means the
             # existing global intervalMs. In on-change mode, poll every 50 ms.
             interval = b.get('publishIntervalMs', self.config['intervalMs']) / 1000
-            if mode == 'interval' and last_at is not None and now - last_at < interval:
+            if mode == 'interval' and last_at is not None and now - last_at < interval and not math.isclose(now - last_at, interval, rel_tol=0, abs_tol=1e-9):
                 continue
             try:
                 raw = self.read(b)
