@@ -271,3 +271,35 @@ def test_multi_broker_bundle_rejects_conflicts_and_limits():
     for case in cases:
         with pytest.raises(ValueError):
             validate_bundle(case)
+
+
+def test_independent_broker_engines_do_not_share_values_or_connection_state():
+    first = Client()
+    second = Client()
+    values = {}
+    config_first = config([binding(id='first', variable='A', topic='sensor/a', arr=1, elem=0)])
+    config_second = config([binding(id='second', variable='B', topic='sensor/b', arr=1, elem=1)])
+    config_second['host'] = 'another-broker'
+    engines = [
+        MqttEngine(config_first, first, lambda _: None,
+                   lambda b, raw: values.__setitem__(b['variable'], raw) or True,
+                   lambda *a: None),
+        MqttEngine(config_second, second, lambda _: None,
+                   lambda b, raw: values.__setitem__(b['variable'], raw) or True,
+                   lambda *a: None),
+    ]
+    engines[0].on_connect(first, None, None, 0, None)
+    engines[1].on_connect(second, None, None, 0, None)
+    engines[0].on_message(first, None, SimpleNamespace(topic='sensor/a', payload=b'11.5'))
+    engines[1].on_message(second, None, SimpleNamespace(topic='sensor/b', payload=b'22.5'))
+    engines[0].tick()
+    engines[1].tick()
+    assert struct.unpack('=f', values['A'])[0] == 11.5
+    assert struct.unpack('=f', values['B'])[0] == 22.5
+    engines[0].on_disconnect(first, None, None, 1, None)
+    assert not engines[0].connected.is_set()
+    assert engines[1].connected.is_set()
+    engines[1].on_message(second, None, SimpleNamespace(topic='sensor/b', payload=b'30.5'))
+    engines[1].tick()
+    assert struct.unpack('=f', values['B'])[0] == 30.5
+    assert struct.unpack('=f', values['A'])[0] == 11.5
