@@ -25,6 +25,11 @@ logger, _ = get_logger(__name__)
 # reads the Editor's I/O mapping; the bus half (ethercat_busconfig.json) goes to EtherDOG.
 PLUGIN_CONFIG_ALIASES: dict[str, str] = {"ethercat": "ethercat_iomapping"}
 
+# MQTT's configuration is compiled together with the PLC/debug-map and must stay
+# in generated/conf. Copying it to the plugin source directory breaks its
+# debug-map lookup and makes plugins.conf point at a stale project config.
+PROJECT_SCOPED_PLUGIN_CONFIGS = frozenset({"mqtt"})
+
 class PluginType(IntEnum):
     """Plugin type enumeration."""
     PYTHON = 0
@@ -309,7 +314,7 @@ class PluginsConfiguration:
         
         Args:
             config_dir: Directory containing configuration files
-            copy_to_plugin_dirs: If True, copy config files to plugin directories instead of referencing directly
+            copy_to_plugin_dirs: If True, copy configs to plugin directories except project-scoped configs (MQTT)
             
         Returns:
             Tuple of (number_of_plugins_updated, list_of_update_messages)
@@ -339,7 +344,7 @@ class PluginsConfiguration:
             if plugin.name in available_configs:
                 source_config = available_configs[plugin.name]
                 
-                if copy_to_plugin_dirs:
+                if copy_to_plugin_dirs and plugin.name not in PROJECT_SCOPED_PLUGIN_CONFIGS:
                     # Copy config file to plugin directory
                     plugin_dir = os.path.dirname(plugin.path)
                     if plugin_dir and plugin_dir != ".":

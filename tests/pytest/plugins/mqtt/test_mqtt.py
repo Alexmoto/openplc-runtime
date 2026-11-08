@@ -91,7 +91,7 @@ def test_register_preserves_existing_configuration(tmp_path):
     source = Path(__file__).resolve().parents[4] / 'tools/register_mqtt.py'
     spec = importlib.util.spec_from_file_location('register_mqtt', source)
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-    plugin = tmp_path / 'core/src/drivers/plugins/python/mqtt/plugin.py'
+    plugin = tmp_path / 'core/src/drivers/plugins/python/mqtt/mqtt_plugin.py'
     plugin.parent.mkdir(parents=True); plugin.write_text('')
     original = '# existing settings\nmodbus_master,custom.py,1,0,custom.json,customvenv\n'
     (tmp_path / 'plugins.conf').write_text(original)
@@ -103,3 +103,39 @@ def test_register_preserves_existing_configuration(tmp_path):
     module.register(tmp_path)
     assert (tmp_path / 'plugins.conf').read_text() == registered
     assert len(list(tmp_path.glob('plugins.conf.backup.*'))) == 1
+
+
+def test_register_migrates_old_entry_and_keeps_enabled_flag(tmp_path):
+    import importlib.util
+    source = Path(__file__).resolve().parents[4] / 'tools/register_mqtt.py'
+    spec = importlib.util.spec_from_file_location('register_mqtt', source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    plugin = tmp_path / 'core/src/drivers/plugins/python/mqtt/mqtt_plugin.py'
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text('')
+    old_line = ('mqtt,./core/src/drivers/plugins/python/mqtt/plugin.py,1,0,'
+                './core/src/drivers/plugins/python/mqtt/mqtt.json,./venvs/mqtt')
+    other_line = 'modbus_master,custom.py,1,0,custom.json,customvenv'
+    conf = tmp_path / 'plugins.conf'
+    conf.write_text(other_line + '\n' + old_line + '\n')
+    module.register(tmp_path, check=True)
+    assert old_line in conf.read_text()
+    assert not list(tmp_path.glob('plugins.conf.backup.*'))
+    module.register(tmp_path)
+    assert conf.read_text() == other_line + '\n' + module.ENTRY.replace(',0,0,', ',1,0,') + '\n'
+    assert len(list(tmp_path.glob('plugins.conf.backup.*'))) == 1
+    module.register(tmp_path)
+    assert len(list(tmp_path.glob('plugins.conf.backup.*'))) == 1
+
+
+def test_mqtt_plugin_module_name_is_unique():
+    root = Path(__file__).resolve().parents[4]
+    defaults = (root / 'plugins_default.conf').read_text()
+    mqtt_entry = next(line for line in defaults.splitlines() if line.startswith('mqtt,'))
+    opc_entry = next(line for line in defaults.splitlines() if line.startswith('opcua,'))
+    mqtt_module = Path(mqtt_entry.split(',')[1]).stem
+    opc_module = Path(opc_entry.split(',')[1]).stem
+    assert mqtt_module == 'mqtt_plugin'
+    assert mqtt_module != opc_module
+    assert (root / mqtt_entry.split(',')[1]).is_file()

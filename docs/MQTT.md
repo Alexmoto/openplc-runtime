@@ -14,13 +14,19 @@ python3 tools/register_mqtt.py
 bash scripts/manage_plugin_venvs.sh create mqtt
 ```
 
-The registration helper preserves other plugins and existing MQTT enable/config
-settings. The Python virtual environment installs `paho-mqtt==2.1.0`.
+The registration helper migrates any previous `mqtt/plugin.py` entry point
+and stale plugin-directory `mqtt.json` path, while preserving the enabled flag
+and other plugins' settings. The unique `mqtt_plugin.py` module name avoids a
+Python import collision with OPC UA's `plugin.py`. The Python virtual
+environment installs `paho-mqtt==2.1.0`.
 No C/C++ changes or core rebuild are needed for the MQTT plugin itself. Uploading
 an edited PLC project still triggers the normal project compilation.
 
 Compile and upload a project from the matching Editor. Its `conf/mqtt.json`
-enables the plugin through the existing plugin configuration loader. Start the
+enables the plugin through the existing plugin configuration loader. MQTT's
+configuration stays in `core/generated/conf/mqtt.json` on the device rather
+than being copied into the plugin source directory, so each new upload keeps
+the configuration and compiled `debug-map.json` together. Start the
 PLC project normally. MQTT starts/stops with its plugin lifecycle; the broker
 need not be reachable when the PLC starts. Disabling MQTT in Editor and uploading
 again omits the config and disables the plugin.
