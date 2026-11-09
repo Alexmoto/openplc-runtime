@@ -10,6 +10,7 @@ import stat
 import threading
 import time
 from .model import require
+from .trends import TrendStore
 
 
 class Engine:
@@ -20,6 +21,7 @@ class Engine:
         self.updated = 0.0
         self.leases = {}  # target -> (owner, expiry); expired releases retried while backend offline
         self.held_elements = {}
+        self.history = TrendStore(model.doc)
         self.period = model.doc['refreshMs'] / 1000
         self.lease_seconds = max(1.0, self.period * 3)
         self.closed = threading.Event()
@@ -35,6 +37,7 @@ class Engine:
                         self.backend.write(path, False)
                         del self.leases[path]
                         del self.held_elements[path]
+                self.history.capture(now, time.time(), values)
                 self.values, self.error, self.updated = values, '', time.monotonic()
             except (ValueError, OSError, ConnectionError) as exc:
                 self.error = str(exc)
@@ -68,6 +71,9 @@ class Engine:
                 return dict(ok=True, online=online, error=self.error or ('' if online else 'Stale data'),
                             values=self.values if online else {},
                             md5=self.model.md5)
+            if op == 'trends':
+                return dict(ok=True, online=self.online(),
+                            history=self.history.for_screen(request.get('screen'), time.time()))
             if op == 'release':
                 self.release(owner)
                 return dict(ok=True)
