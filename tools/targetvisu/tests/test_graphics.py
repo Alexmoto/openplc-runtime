@@ -155,13 +155,13 @@ class GraphicTests(unittest.TestCase):
                 data = image.get_data()
                 pos = y * image.get_stride() + x * 4
                 return bytes(data[pos:pos + 4])
-            self.assertEqual(pixel(surface, x, y), b'\\x00\\xff\\x00\\xff')
-            self.assertEqual(pixel(surface, e['x'] + e['width']//2, y), b'\\x00\\xff\\x00\\xff')
+            self.assertEqual(pixel(surface, x, y), b'\x00\xff\x00\xff')
+            self.assertEqual(pixel(surface, e['x'] + e['width']//2, y), b'\x00\xff\x00\xff')
             e['strokeTransparent'] = False
             surface2 = cairo.ImageSurface(cairo.FORMAT_ARGB32, screen['width'], screen['height'])
             draw(cairo.Context(surface2), model, screen, {}, True, screen['width'], screen['height'])
             surface2.flush()
-            self.assertNotEqual(pixel(surface2, x, y), b'\\x00\\xff\\x00\\xff')
+            self.assertNotEqual(pixel(surface2, x, y), b'\x00\xff\x00\xff')
 
     def test_placement(self):
         self.assertEqual(placement(200,100,100,100,'contain'),(0,25,0.5,0.5))
