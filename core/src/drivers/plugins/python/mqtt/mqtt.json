@@ -1,0 +1,29 @@
+{
+  "enabled": true,
+  "host": "192.168.1.35",
+  "port": 1883,
+  "clientId": "",
+  "username": "homeassistant",
+  "password": "homeassistant",
+  "tls": false,
+  "caFile": "",
+  "keepalive": 30,
+  "intervalMs": 500,
+  "bindings": [
+    {
+      "id": "5911db63-2faf-4b57-bcec-1634231bf684",
+      "direction": "subscribe",
+      "variable": "INSTANCE0.CURRTEMP",
+      "topic": "tele/tasmota222/SENSOR",
+      "qos": 0,
+      "retain": false,
+      "jsonPointer": "/OPENTHERM/HWTMP/ACT",
+      "type": "REAL",
+      "size": 4,
+      "arr": 1,
+      "elem": 0
+    }
+  ],
+  "version": 1,
+  "programMd5": "40f42c3a9cc0ea02ea635f330aa242b7"
+}
