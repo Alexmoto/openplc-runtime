@@ -389,3 +389,66 @@ main()
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def trend_fixture():
+    doc = copy.deepcopy(fixture().doc)
+    element = next(e for e in doc['screens'][0]['elements'] if e['kind'] == 'number')
+    element['kind'] = 'trend'
+    element.pop('numberMode', None)
+    element['action'] = dict(kind='none', target='', value=True)
+    element['bindings']['value'] = ''
+    element['trend'] = dict(sampleMs=1000, durationSec=300, autoScale=True,
+                            series=[dict(path='Pump1.Pressure', label='Pressure', color='#16a34a')])
+    return doc, element
+
+
+class TrendTests(unittest.TestCase):
+    def test_trend_resolves_compiled_numeric_symbols(self):
+        doc, element = trend_fixture()
+        m = Model(doc, load_json(ROOT / 'example.debug-map.json'))
+        self.assertIn('pump1.pressure', m.paths)
+        element['trend']['series'][0]['path'] = 'Pump1.Running'
+        with self.assertRaisesRegex(ValueError, 'numeric PLC'):
+            Model(doc, load_json(ROOT / 'example.debug-map.json'))
+        element['trend']['series'][0]['path'] = 'Pump1.Pressure'
+        element['trend']['sampleMs'] = 250
+        with self.assertRaisesRegex(ValueError, '600 samples'):
+            Model(doc, load_json(ROOT / 'example.debug-map.json'))
+
+    def test_bounded_retention_and_screen_access(self):
+        from targetvisu.trends import TrendStore
+        doc, element = trend_fixture()
+        store = TrendStore(doc)
+        start = 1700000000
+        for index in range(700):
+            store.capture(float(index), start + index,
+                          {'pump1.pressure': index})
+        history = store.for_screen(doc['screens'][0]['id'], start + 700)
+        samples = history[element['id']]
+        self.assertTrue(0 < len(samples) <= 301)
+        self.assertEqual(samples[-1][1], 699)
+        self.assertGreaterEqual(samples[0][0], start + 400)
+        with self.assertRaisesRegex(ValueError, 'Unknown Trend screen'):
+            store.for_screen('unknown', start + 700)
+
+    def test_broker_exposes_history_without_accepting_arbitrary_screen(self):
+        doc, element = trend_fixture()
+        model = Model(doc, load_json(ROOT / 'example.debug-map.json'))
+        engine = Engine(model, Demo(model))
+        engine.tick()
+        result = engine.request(dict(op='trends', screen=doc['screens'][0]['id']), 1)
+        self.assertTrue(result['online'])
+        self.assertEqual(len(result['history'][element['id']]), 1)
+        with self.assertRaisesRegex(ValueError, 'Unknown Trend screen'):
+            engine.request(dict(op='trends', screen='not-a-screen'), 1)
+
+    def test_auto_scale_and_gap_segments(self):
+        from targetvisu.trend_render import y_bounds, series_segments
+        doc, element = trend_fixture()
+        low, high = y_bounds(element, [[100, 40], [101, 40]])
+        self.assertLess(low, 40)
+        self.assertGreater(high, 40)
+        segments = series_segments([[100, 1], [101, 2], [105, 3]],
+                                   0, 110, 60, 1000)
+        self.assertEqual([len(s) for s in segments], [2, 1])
