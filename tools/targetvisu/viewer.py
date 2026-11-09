@@ -26,7 +26,7 @@ def run(model, broker_path, fullscreen=False, demo=False):
     canvas.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
                       Gdk.EventMask.LEAVE_NOTIFY_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
     window.add(canvas)
-    state = dict(screen=initial, values={}, online=False, pressed=None)
+    state = dict(screen=initial, values={}, online=False, pressed=None, trends={})
     commands = queue.Queue(maxsize=32)
     closed = threading.Event()
     disconnect = threading.Event()
@@ -41,6 +41,12 @@ def run(model, broker_path, fullscreen=False, demo=False):
         canvas.queue_draw()
         return False
 
+    def publish_trends(reply, screen_id):
+        if not closed.is_set() and state['screen']['id'] == screen_id:
+            state['trends'] = reply['history']
+            canvas.queue_draw()
+        return False
+
     def enqueue(request):
         try:
             commands.put_nowait((time.monotonic(), request))
@@ -52,6 +58,7 @@ def run(model, broker_path, fullscreen=False, demo=False):
 
     def worker():
         client = None
+        last_history_at, last_history_screen = 0.0, None
         try:
             while not closed.is_set():
                 try:
@@ -64,6 +71,13 @@ def run(model, broker_path, fullscreen=False, demo=False):
                     if reply['md5'] != model.md5:
                         raise ValueError('Viewer / broker debug-map mismatch')
                     GLib.idle_add(publish, reply)
+                    active_screen = state['screen']
+                    screen_id = active_screen['id']
+                    if (any(e['kind'] == 'trend' for e in active_screen['elements']) and
+                            (screen_id != last_history_screen or time.monotonic() - last_history_at >= 1.0)):
+                        snapshot = client.request(dict(op='trends', screen=screen_id))
+                        GLib.idle_add(publish_trends, snapshot, screen_id)
+                        last_history_at, last_history_screen = time.monotonic(), screen_id
                     try:
                         created, request = commands.get(timeout=model.doc['refreshMs'] / 1000)
                     except queue.Empty:
@@ -104,6 +118,7 @@ def run(model, broker_path, fullscreen=False, demo=False):
             return False
         release()
         state['screen'] = next(s for s in model.doc['screens'] if s['id'] == screen_id)
+        state['trends'] = {}
         canvas.queue_draw()
         return False
 
@@ -139,7 +154,7 @@ def run(model, broker_path, fullscreen=False, demo=False):
 
     def paint(widget, ctx):
         draw(ctx, model, state['screen'], state['values'], state['online'],
-             canvas.get_allocated_width(), canvas.get_allocated_height(), state['pressed'])
+             canvas.get_allocated_width(), canvas.get_allocated_height(), state['pressed'], state['trends'])
         return False
 
     def destroy(*_):
