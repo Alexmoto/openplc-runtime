@@ -9,7 +9,7 @@ from .graphics import validate_graphic
 
 FORMATS = dict(BOOL='?', SINT='b', USINT='B', BYTE='B', INT='h', UINT='H', WORD='H',
                DINT='i', UDINT='I', DWORD='I', LINT='q', ULINT='Q', LWORD='Q', REAL='f', LREAL='d')
-KINDS = {'rectangle', 'ellipse', 'line', 'text', 'indicator', 'button', 'number', 'graphic'}
+KINDS = {'rectangle', 'ellipse', 'line', 'text', 'indicator', 'button', 'number', 'graphic', 'trend'}
 ACTIONS = {'none', 'set', 'toggle', 'momentary', 'write', 'navigate'}
 LAMP_SELECTOR_TYPES = {'SINT', 'USINT', 'BYTE', 'INT', 'UINT', 'WORD', 'DINT', 'UDINT', 'DWORD'}
 
@@ -38,6 +38,7 @@ def document(raw):
     screens = raw.get('screens')
     require(isinstance(screens, list) and 1 <= len(screens) <= 64, 'Expected 1..64 screens')
     ids, names = set(), set()
+    trend_count = 0
     def unique(obj):
         require(isinstance(obj, dict), 'Expected screen/element object')
         key = obj.get('id')
@@ -65,6 +66,32 @@ def document(raw):
         for e in elements:
             unique(e)
             require(e.get('kind') in KINDS, 'Unknown element kind')
+            if e['kind'] == 'trend':
+                trend_count += 1
+                trend = e.get('trend')
+                require(isinstance(trend, dict) and set(trend) == {
+                    'sampleMs', 'durationSec', 'autoScale', 'series'
+                }, 'Invalid Trend settings')
+                number(trend['sampleMs'], 250, 60000, 'Trend sampleMs', True)
+                number(trend['durationSec'], 30, 3600, 'Trend durationSec', True)
+                require(type(trend['autoScale']) is bool, 'Invalid Trend autoScale')
+                require(math.ceil(trend['durationSec'] * 1000 / trend['sampleMs']) <= 600,
+                        'Trend history exceeds 600 samples')
+                series = trend['series']
+                require(isinstance(series, list) and 1 <= len(series) <= 4, 'Trend needs 1..4 curves')
+                paths = set()
+                for curve in series:
+                    require(isinstance(curve, dict) and set(curve) == {'path', 'color', 'label'},
+                            'Invalid Trend curve')
+                    path = curve['path']
+                    require(isinstance(path, str) and 1 <= len(path) <= 256 and path.lower() not in paths,
+                            'Invalid or duplicate Trend path')
+                    paths.add(path.lower())
+                    require(isinstance(curve['label'], str) and len(curve['label']) <= 80,
+                            'Invalid Trend legend')
+                    color(curve, 'color')
+            else:
+                require('trend' not in e, 'Trend settings require a Trend element')
             if e.get('kind') == 'graphic':
                 validate_graphic(e.get('graphic'))
             require(isinstance(e.get('name'), str) and 1 <= len(e['name']) <= 80, 'Invalid name')
@@ -105,6 +132,9 @@ def document(raw):
             require(isinstance(a, dict), 'Invalid action object')
             if e['kind'] == 'graphic':
                 require(a.get('kind') == 'none', 'Graphic view is display-only')
+            if e['kind'] == 'trend':
+                require(a.get('kind') == 'none', 'Trend is display-only')
+                require(not e['bindings']['value'], 'Trend uses curve bindings, not Value variable')
             if style == 'lamp12':
                 require(e['bindings']['value'], '12-color lamp requires a PLC value variable')
                 require(a.get('kind') == 'none', '12-color lamp is display-only')
@@ -120,6 +150,7 @@ def document(raw):
                 require(math.isfinite(a['value']), 'Non-finite action value')
             if isinstance(a['value'], str):
                 require(len(a['value']) <= 256, 'Action value too long')
+    require(trend_count <= 8, 'At most 8 Trend elements per project')
     require(raw.get('startScreen') in {s['id'] for s in screens}, 'Missing start screen')
     screen_ids = {s['id'] for s in screens}
     for screen in screens:
@@ -171,6 +202,11 @@ class Model:
                                 leaf['type'] not in ('BOOL', 'REAL', 'LREAL'),
                                 f'{path}: color binding requires integer PLC variable')
                     self.paths.add(path.lower())
+            if e['kind'] == 'trend':
+                for curve in e['trend']['series']:
+                    leaf = self.leaf(curve['path'])
+                    require(leaf['type'] != 'BOOL', 'Trend requires numeric PLC variables')
+                    self.paths.add(curve['path'].lower())
             a = e['action']
             if a['kind'] not in ('none', 'navigate'):
                 leaf = self.leaf(a['target'])
