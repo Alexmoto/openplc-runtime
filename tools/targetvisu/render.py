@@ -3,6 +3,7 @@
 import math
 from .graphics import draw_graphic, _surface
 from .lamp_palette import SPRITE_URL, CELL_SIZE, lamp_state
+from .trend_render import draw_trend
 
 
 def rgb(value):
@@ -64,7 +65,7 @@ def hit(model, screen, values, x, y):
     return None
 
 
-def draw(ctx, model, screen, values, online, width, height, pressed=None):
+def draw(ctx, model, screen, values, online, width, height, pressed=None, trends=None):
     ctx.set_source_rgb(0.12, 0.14, 0.17)
     ctx.paint()
     scale, ox, oy = geometry(screen, width, height)
@@ -84,6 +85,9 @@ def draw(ctx, model, screen, values, online, width, height, pressed=None):
         })
     for e in screen['elements']:
         if not model.visible(e, values):
+            continue
+        if e['kind'] == 'trend':
+            draw_trend(ctx, e, (trends or {}).get(e['id'], []), online)
             continue
         if e['kind'] == 'graphic':
             draw_graphic(ctx, e, model.bound(e, 'value', values), bool(e['bindings'].get('value')))
