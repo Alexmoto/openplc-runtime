@@ -90,12 +90,21 @@ def draw_trend(ctx, element, points, online, now=None, view=None):
         ctx.move_to(x + 4, yy + 3)
         ctx.show_text(f'{value:.4g}'[:9])
 
+    time_format = '%H:%M:%S' if duration <= 180 else '%H:%M'
     for tick in range(3):
         stamp = start + duration * tick / 2
         xx = left + (right - left) * tick / 2
+        ctx.set_source_rgba(0.45, 0.52, 0.61, 0.25)
+        ctx.set_line_width(0.75)
+        ctx.move_to(xx, top)
+        ctx.line_to(xx, bottom)
+        ctx.stroke()
+        timestamp = time.strftime(time_format, time.localtime(stamp))
+        ext = ctx.text_extents(timestamp)
+        text_x = xx if tick == 0 else xx - ext.width if tick == 2 else xx - ext.width / 2
         ctx.set_source_rgb(*_rgb(element['textColor']))
-        ctx.move_to(xx - (4 if tick == 0 else 25 if tick == 2 else 13), bottom + 17)
-        ctx.show_text(time.strftime('%H:%M', time.localtime(stamp)))
+        ctx.move_to(text_x, bottom + 17)
+        ctx.show_text(timestamp)
 
     ctx.save()
     ctx.rectangle(left, top, right - left, bottom - top)
