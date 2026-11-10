@@ -21,8 +21,10 @@ class TrendStore:
                 identifier = element['id']
                 self.configs[identifier] = config
                 self.screens[screen['id']].append(identifier)
-                max_points = math.ceil(config['durationSec'] * 1000 / config['sampleMs']) + 1
-                self.samples[identifier] = deque(maxlen=min(601, max_points))
+                # Keep a bounded reserve for horizontal panning and time zoom-out.
+                # Limit the per-screen broker response even with 8 charts / 4 pens.
+                max_points = 4 * math.ceil(config['durationSec'] * 1000 / config['sampleMs']) + 1
+                self.samples[identifier] = deque(maxlen=min(901, max_points))
 
     def capture(self, monotonic_seconds, unix_seconds, values):
         """Capture at the configured interval, without backfilling missed polls."""
@@ -45,7 +47,7 @@ class TrendStore:
         result = {}
         for identifier in self.screens[screen_id]:
             config = self.configs[identifier]
-            cutoff = unix_seconds - config['durationSec']
+            cutoff = unix_seconds - 4 * config['durationSec']
             result[identifier] = [point for point in self.samples[identifier]
                                   if cutoff <= point[0] <= unix_seconds + 1]
         return result
