@@ -6,6 +6,7 @@ import threading
 import time
 from .service import Client
 from .render import draw, geometry, hit
+from .trend_controls import control_at, apply_control
 from .keypad import show as show_numeric_keypad
 
 
@@ -26,7 +27,7 @@ def run(model, broker_path, fullscreen=False, demo=False):
     canvas.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
                       Gdk.EventMask.LEAVE_NOTIFY_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
     window.add(canvas)
-    state = dict(screen=initial, values={}, online=False, pressed=None, trends={})
+    state = dict(screen=initial, values={}, online=False, pressed=None, trends={}, trend_views={})
     commands = queue.Queue(maxsize=32)
     closed = threading.Event()
     disconnect = threading.Event()
@@ -123,10 +124,30 @@ def run(model, broker_path, fullscreen=False, demo=False):
         return False
 
     def clicked(widget, event):
-        if event.button != 1 or not state['online']:
+        if event.button != 1:
             return False
         scale, ox, oy = geometry(state['screen'], canvas.get_allocated_width(), canvas.get_allocated_height())
-        element = hit(model, state['screen'], state['values'], (event.x - ox) / scale, (event.y - oy) / scale)
+        px, py = (event.x - ox) / scale, (event.y - oy) / scale
+
+        # Only the topmost element handles a click. Trend controls never generate
+        # broker PLC write/action requests, including while the PLC is offline.
+        for chart in reversed(state['screen']['elements']):
+            if (model.visible(chart, state['values']) and chart['x'] <= px <= chart['x'] + chart['width']
+                    and chart['y'] <= py <= chart['y'] + chart['height']):
+                if chart['kind'] == 'trend':
+                    control = control_at(chart, px, py)
+                    if control:
+                        identifier = chart['id']
+                        state['trend_views'][identifier] = apply_control(
+                            chart, state['trends'].get(identifier, []), time.time(),
+                            state['trend_views'].get(identifier), control)
+                        canvas.queue_draw()
+                        return True
+                    return False
+                break
+        if not state['online']:
+            return False
+        element = hit(model, state['screen'], state['values'], px, py)
         if not element:
             return False
         action = element['action']
@@ -154,7 +175,7 @@ def run(model, broker_path, fullscreen=False, demo=False):
 
     def paint(widget, ctx):
         draw(ctx, model, state['screen'], state['values'], state['online'],
-             canvas.get_allocated_width(), canvas.get_allocated_height(), state['pressed'], state['trends'])
+             canvas.get_allocated_width(), canvas.get_allocated_height(), state['pressed'], state['trends'], state['trend_views'])
         return False
 
     def destroy(*_):
