@@ -2,26 +2,11 @@
 """Cairo chart for bounded TargetVisu trend history (no GTK imports)."""
 import math
 import time
+from .trend_controls import y_bounds, viewport, toolbar_boxes
 
 
 def _rgb(color):
     return tuple(int(color[i:i + 2], 16) / 255 for i in (1, 3, 5))
-
-
-def y_bounds(element, points):
-    """Return finite, non-degenerate Y limits for a fixed or auto-scaled trend."""
-    trend = element['trend']
-    if trend['autoScale']:
-        values = [float(value) for row in points for value in row[1:]
-                  if type(value) in (int, float) and math.isfinite(value)]
-        if values:
-            low, high = min(values), max(values)
-            margin = max((high - low) * 0.05, abs(high) * 0.001, 0.1)
-            return low - margin, high + margin
-    low, high = float(element['minimum']), float(element['maximum'])
-    if high <= low:
-        high = low + 1
-    return low, high
 
 
 def series_segments(points, index, now, duration, sample_ms):
@@ -48,7 +33,7 @@ def series_segments(points, index, now, duration, sample_ms):
     return segments
 
 
-def draw_trend(ctx, element, points, online, now=None):
+def draw_trend(ctx, element, points, online, now=None, view=None):
     if now is None:
         now = time.time()
     x, y, w, h = (element[key] for key in ('x', 'y', 'width', 'height'))
@@ -79,12 +64,18 @@ def draw_trend(ctx, element, points, online, now=None):
         return
 
     trend = element['trend']
+    controls = toolbar_boxes(element)
     left, right = x + 48, x + w - 12
-    top, bottom = y + 46, y + h - 30
-    low, high = y_bounds(element, points)
+    top = y + 46
+    # Controls are below the time labels, not over the plot.
+    rows = 2 if len(controls) > 4 and controls[0][3] != controls[-1][3] else 1 if controls else 0
+    bottom = y + h - (73 if rows == 2 else 49 if rows == 1 else 30)
+    if bottom - top < 10:
+        ctx.restore()
+        return
+    start, end, low, high, _ = viewport(element, points, now, view)
     span = high - low
-    duration = trend['durationSec']
-    start = now - duration
+    duration = end - start
 
     ctx.set_font_size(10)
     for tick in range(5):
@@ -112,7 +103,7 @@ def draw_trend(ctx, element, points, online, now=None):
     for index, series in enumerate(trend['series']):
         ctx.set_source_rgb(*_rgb(series['color']))
         ctx.set_line_width(1.8)
-        for segment in series_segments(points, index, now, duration, trend['sampleMs']):
+        for segment in series_segments(points, index, end, duration, trend['sampleMs']):
             ctx.new_path()
             for i, (stamp, value) in enumerate(segment):
                 xx = left + (stamp - start) / duration * (right - left)
@@ -140,4 +131,20 @@ def draw_trend(ctx, element, points, online, now=None):
         ctx.set_source_rgb(*_rgb(element['textColor']))
         ctx.move_to(legend_x + 16, legend_y + 3)
         ctx.show_text((series['label'] or series['path'].split('.')[-1])[:16])
+
+    # Local view controls; no PLC actions or broker requests are generated.
+    ctx.set_font_size(10)
+    for action, label, bx, by, bw, bh in controls:
+        active = action == 'live' and bool(view)
+        ctx.set_source_rgba(0.18, 0.39, 0.58, 0.94) if active else ctx.set_source_rgba(0.18, 0.23, 0.31, 0.9)
+        ctx.rectangle(bx, by, bw, bh)
+        ctx.fill_preserve()
+        ctx.set_source_rgba(0.58, 0.67, 0.77, 0.85)
+        ctx.set_line_width(0.75)
+        ctx.stroke()
+        ext = ctx.text_extents(label)
+        ctx.set_source_rgb(1, 1, 1)
+        ctx.move_to(bx + (bw - ext.width) / 2 - ext.x_bearing,
+                    by + (bh - ext.height) / 2 - ext.y_bearing)
+        ctx.show_text(label)
     ctx.restore()
