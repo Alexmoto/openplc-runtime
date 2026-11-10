@@ -426,11 +426,54 @@ class TrendTests(unittest.TestCase):
                           {'pump1.pressure': index})
         history = store.for_screen(doc['screens'][0]['id'], start + 700)
         samples = history[element['id']]
-        self.assertTrue(0 < len(samples) <= 301)
+        self.assertTrue(301 < len(samples) <= 901)
         self.assertEqual(samples[-1][1], 699)
-        self.assertGreaterEqual(samples[0][0], start + 400)
+        self.assertLess(samples[0][0], start + 400)  # reserve for horizontal pan
         with self.assertRaisesRegex(ValueError, 'Unknown Trend screen'):
             store.for_screen('unknown', start + 700)
+
+
+    def test_trend_toolbar_zoom_pan_and_live_reset(self):
+        from targetvisu.trend_controls import toolbar_boxes, control_at, apply_control, viewport
+        _, element = trend_fixture()
+        element.update(x=20, y=10, width=320, height=180)
+        boxes = toolbar_boxes(element)
+        self.assertEqual(len(boxes), 9)
+        for action, _, x, y, w, h in boxes:
+            self.assertEqual(control_at(element, x + w / 2, y + h / 2), action)
+        self.assertIsNone(control_at(element, element['x'] + 5, element['y'] + 5))
+        points = [[1000 + i, float(i)] for i in range(601)]
+        now = 1600.0
+        initial = viewport(element, points, now)
+        self.assertEqual(initial[:2], (1300.0, 1600.0))
+        state = apply_control(element, points, now, None, 'older')
+        self.assertEqual(viewport(element, points, now, state)[:2], (1225.0, 1525.0))
+        self.assertEqual(viewport(element, points, now + 100, state)[1], 1525.0)
+        state = apply_control(element, points, now, state, 'newer')
+        self.assertEqual(viewport(element, points, now, state)[:2], (1300.0, 1600.0))
+        state = apply_control(element, points, now, state, 'time_in')
+        self.assertEqual(viewport(element, points, now, state)[1] -
+                         viewport(element, points, now, state)[0], 200.0)
+        state = apply_control(element, points, now, state, 'time_out')
+        self.assertEqual(viewport(element, points, now, state)[:2], (1300.0, 1600.0))
+        base_low, base_high = viewport(element, points, now)[2:4]
+        state = apply_control(element, points, now, state, 'value_in')
+        lower, upper = viewport(element, points, now, state)[2:4]
+        self.assertLess(upper - lower, base_high - base_low)
+        state = apply_control(element, points, now, state, 'down')
+        self.assertLess(viewport(element, points, now, state)[3], upper)
+        self.assertEqual(apply_control(element, points, now, state, 'live'), {})
+        self.assertEqual(viewport(element, points, now, {})[:2], initial[:2])
+
+    def test_narrow_trend_toolbar_uses_two_rows(self):
+        from targetvisu.trend_controls import toolbar_boxes, control_at
+        _, element = trend_fixture()
+        element.update(x=30, y=20, width=160, height=180)
+        boxes = toolbar_boxes(element)
+        self.assertEqual(len(boxes), 9)
+        self.assertNotEqual(boxes[0][3], boxes[8][3])
+        for action, _, x, y, w, h in boxes:
+            self.assertEqual(control_at(element, x + w / 2, y + h / 2), action)
 
     def test_broker_exposes_history_without_accepting_arbitrary_screen(self):
         doc, element = trend_fixture()
